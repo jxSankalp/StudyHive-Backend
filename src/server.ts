@@ -1,6 +1,7 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import userRoutes from './routes/userRoutes';
+import chatRoutes from './routes/chatRoutes';
 import webhookRouter from './routes/webhooks';
 import { connectDB } from './config/db';
 
@@ -18,6 +19,7 @@ connectDB();
 
 // Routes
 app.use('/api/users', userRoutes);
+app.use('/api/chat', chatRoutes);
 
 
 const PORT = process.env.PORT || 3000;

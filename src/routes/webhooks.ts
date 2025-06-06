@@ -1,6 +1,10 @@
 import { Request, Response } from "express";
 import dotenv from "dotenv";
-import { createUserInDB, deleteUserFromDB, updateUserInDB } from "../services/user.service";
+import {
+  createUserInDB,
+  deleteUserFromDB,
+  updateUserInDB,
+} from "../services/user.service";
 const express = require("express");
 const router = express.Router();
 const { Webhook } = require("svix");
@@ -8,7 +12,6 @@ const bodyParser = require("body-parser");
 const { clerkClient } = require("@clerk/clerk-sdk-node");
 
 dotenv.config();
-
 
 const WEBHOOK_SECRET = process.env.CLERK_WEBHOOK_SIGNING_SECRET;
 
@@ -20,7 +23,7 @@ if (!WEBHOOK_SECRET) {
 router.post(
   "/",
   bodyParser.raw({ type: "application/json" }),
-  async (req:Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const svix = new Webhook(WEBHOOK_SECRET);
 
     let evt;

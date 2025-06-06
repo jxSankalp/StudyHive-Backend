@@ -10,9 +10,16 @@ export const getUserByIdFromDB = async (clerkId: string) => {
   return await User.findOne({ clerkId });
 };
 
-export const updateUserInDB = async (clerkId: string, params: UpdateUserParams) => {
+export const updateUserInDB = async (
+  clerkId: string,
+  params: UpdateUserParams
+) => {
   const { username, photo } = params;
-  return await User.findOneAndUpdate({ clerkId }, { username, photo }, { new: true });
+  return await User.findOneAndUpdate(
+    { clerkId },
+    { username, photo },
+    { new: true }
+  );
 };
 
 export const deleteUserFromDB = async (clerkId: string) => {
