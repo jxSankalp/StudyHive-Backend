@@ -65,8 +65,8 @@ export const createGroupChat = async (
     const newGroup = await Chat.create({
       chatName: name,
       description,
-      users: allUsers.map((u) => u.clerkId),
-      groupAdmin: admin.clerkId,
+      users: allUsers.map((u) => u._id),
+      groupAdmin: admin._id,
     });
 
     // Add this chat to each user's chats
