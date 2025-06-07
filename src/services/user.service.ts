@@ -1,4 +1,4 @@
-import { User } from "../models/User";
+import { User } from "../models/userModel";
 import { CreateUserParams, UpdateUserParams } from "../types/user";
 
 export const createUserInDB = async (params: CreateUserParams) => {

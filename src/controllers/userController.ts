@@ -5,12 +5,14 @@ import {
   updateUserInDB,
   deleteUserFromDB,
 } from "../services/user.service";
+import { User } from "../models/userModel";
 import { UpdateUserParams } from "../types/user";
+import { getAuth } from "@clerk/express";
 
 export const createUser = async (
   req: Request,
   res: Response
-): Promise<void> => {
+) => {
   try {
     const newUser = await createUserInDB(req.body);
     res.status(201).json(newUser);
@@ -22,7 +24,7 @@ export const createUser = async (
 export const getUserById = async (
   req: Request,
   res: Response
-): Promise<void> => {
+) => {
   try {
     const user = await getUserByIdFromDB(req.params.id);
     if (!user) {
@@ -38,7 +40,7 @@ export const getUserById = async (
 export const updateUser = async (
   req: Request,
   res: Response
-): Promise<void> => {
+) => {
   try {
     const updatedUser = await updateUserInDB(
       req.params.id,
@@ -57,7 +59,7 @@ export const updateUser = async (
 export const deleteUser = async (
   req: Request,
   res: Response
-): Promise<void> => {
+) => {
   try {
     const deletedUser = await deleteUserFromDB(req.params.id);
     if (!deletedUser) {
@@ -67,5 +69,27 @@ export const deleteUser = async (
     res.json({ message: "User deleted successfully" });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
+  }
+};
+
+export const searchUsers = async (req: Request, res: Response) => {
+  const { query } = req.query;
+
+  const { userId } = getAuth(req);
+
+  if (!query || typeof query !== "string") {
+    res.status(400).json({ error: "Query is required" });
+    return
+  }
+
+  try {
+    const users = await User.find({
+      username: { $regex: new RegExp("^" + query, "i") },
+      clerkId: { $ne: userId }, // starts with query, case-insensitive
+    }).select("clerkId username");
+
+    res.json({ users });  
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
   }
 };
