@@ -10,6 +10,7 @@ import messageRoutes from "./routes/messageRoutes";
 import notesRoutes from "./routes/notesRoutes";
 import { clerkMiddleware } from "@clerk/express";
 import { connectDB } from "./config/db";
+import videoRoutes from "./routes/video.Routes";
 
 dotenv.config();
 
@@ -25,6 +26,7 @@ app.use(express.json());
 connectDB();
 
 // Routes
+app.use("/api/meet", videoRoutes); 
 app.use("/api/users", userRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/messages", messageRoutes);

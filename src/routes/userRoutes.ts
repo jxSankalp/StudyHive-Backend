@@ -5,10 +5,12 @@ import {
   updateUser,
   deleteUser,
   searchUsers,
+  getCurrentUser,
 } from "../controllers/userController";
 
 const router = express.Router();
 
+router.get("/me", getCurrentUser);
 router.post("/", createUser);
 router.get("/search", searchUsers);
 router.get("/:id", getUserById);

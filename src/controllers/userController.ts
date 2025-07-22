@@ -9,6 +9,26 @@ import { User } from "../models/userModel";
 import { UpdateUserParams } from "../types/user";
 import { getAuth } from "@clerk/express";
 
+export const getCurrentUser = async (req: Request, res: Response) => {
+  const { userId } = getAuth(req);
+  console.log("Authenticated Clerk userId:", userId);
+
+  if (!userId) {
+    res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    const user = await User.findOne({ clerkId: userId }).select("clerkId username photo");
+    if (!user) {
+      res.status(404).json({ error: "User not found in DB" });
+    }
+
+    res.json(user);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || "Server error" });
+  }
+};
+
 export const createUser = async (
   req: Request,
   res: Response
