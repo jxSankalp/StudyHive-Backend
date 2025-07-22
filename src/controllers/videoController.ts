@@ -86,7 +86,6 @@ export const generateUserToken = async (req: Request, res: Response):Promise<voi
   try {
     const token = streamClient.generateUserToken({
       user_id: clerkId,
-      // optional validity in seconds (default: 3600 = 1 hour)
       validity_in_seconds: 3600,
     });
 
