@@ -3,6 +3,7 @@ import { Server } from "socket.io";
 import type { Server as HTTPServer } from "http";
 import type { Chat, Message } from "./types/user";
 import { Notes } from "./models/notesModel";
+import { Whiteboard } from "./models/whiteboardModel";
 
 let io: Server;
 
@@ -49,9 +50,34 @@ export const initSocket = (server: HTTPServer) => {
         console.error("Error saving note:", error);
       }
     });
-      
+       // New WebSocket Events for Whiteboard
+    socket.on("whiteboard:join", (whiteboardId: string, userId: string) => {
+      socket.join(whiteboardId);
+      console.log(`${userId} joined whiteboard room: ${whiteboardId}`);
+    });
+
+    socket.on("whiteboard:draw", (data) => {
+      const { whiteboardId, drawingData } = data;
+      socket.to(whiteboardId).emit("whiteboard:update", drawingData);
+    });
+
+    socket.on("whiteboard:save", async ({ whiteboardId, whiteboardData }) => {
+      try {
+        await Whiteboard.findByIdAndUpdate(
+          whiteboardId,
+          { data: whiteboardData }
+        );
+        console.log(`Whiteboard ${whiteboardId} saved to DB`);
+      } catch (error) {
+        console.error("Error saving whiteboard:", error);
+      }
+    });
+  // });
+
   
   });
+
+  
 
   return io;
 };

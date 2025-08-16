@@ -39,3 +39,17 @@ export type Message = {
   createdAt: Date;
   updatedAt: Date;
 };
+
+
+export type Whiteboard = {
+  _id: string;
+  name: string;
+  groupId: string;
+  createdBy: {
+    _id: string;
+    username: string;
+  };
+  data: any; // Stores the canvas state (e.g., JSON representation)
+  createdAt: string;
+  updatedAt: string;
+};

@@ -11,6 +11,7 @@ import notesRoutes from "./routes/notesRoutes";
 import { clerkMiddleware } from "@clerk/express";
 import { connectDB } from "./config/db";
 import videoRoutes from "./routes/video.Routes";
+import whiteboardRoutes from "./routes/whiteboardRoutes";
 
 dotenv.config();
 
@@ -31,6 +32,7 @@ app.use("/api/users", userRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/messages", messageRoutes);
 app.use("/api/notes", notesRoutes);
+app.use("/api/whiteboards", whiteboardRoutes);
 
 // Start server
 const PORT = process.env.PORT || 3000;

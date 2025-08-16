@@ -1,16 +1,18 @@
-import express from "express";
+// src/routes/whiteboardRoutes.ts
+import { Router } from "express";
 import {
   createWhiteboard,
-  getWhiteboardsByChat,
+  getWhiteboardsByGroup,
   getWhiteboardById,
-  updateWhiteboard,
-} from "../controllers/whiteboardController";
+  saveWhiteboardState,
+} from "../controllers/whiteBoardController";
 
-const router = express.Router();
 
-router.post("/", createWhiteboard);
-router.get("/chat/:chatId", getWhiteboardsByChat);
-router.get("/:id", getWhiteboardById);
-router.put("/:id", updateWhiteboard);
+const router = Router();
+
+router.route("/").post(createWhiteboard);
+router.route("/group/:groupId").get(getWhiteboardsByGroup);
+router.route("/:id").get(getWhiteboardById);
+router.route("/:id/save").put( saveWhiteboardState);
 
 export default router;
