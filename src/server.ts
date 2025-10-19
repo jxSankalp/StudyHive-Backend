@@ -10,7 +10,7 @@ import messageRoutes from "./routes/messageRoutes";
 import notesRoutes from "./routes/notesRoutes";
 import { clerkMiddleware } from "@clerk/express";
 import { connectDB } from "./config/db";
-import videoRoutes from "./routes/video.Routes";
+import videoRoutes from "./routes/videoRoutes";
 import whiteboardRoutes from "./routes/whiteboardRoutes";
 
 dotenv.config();
