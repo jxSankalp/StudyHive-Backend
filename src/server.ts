@@ -21,6 +21,7 @@ const server = createServer(app);
 
 app.use(cors({
   origin:process.env.CLIENT_URL ,
+    credentials: true,
 }));
 
 // Need to be before express.json() for svix webhook raw body
