@@ -12,11 +12,16 @@ import { clerkMiddleware } from "@clerk/express";
 import { connectDB } from "./config/db";
 import videoRoutes from "./routes/videoRoutes";
 import whiteboardRoutes from "./routes/whiteboardRoutes";
+import cors from "cors";
 
 dotenv.config();
 
 const app = express();
 const server = createServer(app); 
+
+app.use(cors({
+  origin:process.env.CLIENT_URL ,
+}));
 
 // Need to be before express.json() for svix webhook raw body
 app.use("/api/webhooks", webhookRouter);
