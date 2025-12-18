@@ -53,15 +53,26 @@ export const register = async (req: Request, res: Response): Promise<void> => {
     });
 
     // Send OTP via email
+    // Send OTP via email
     if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-      await transporter.sendMail({
-        from: process.env.EMAIL_USER,
-        to: email,
-        subject: "StudyHive Verification OTP",
-        text: `Your OTP is ${otp}. It expires in 10 minutes.`,
-      });
+      console.log(`[AUTH] Attempting to send OTP to ${email}...`);
+      try {
+        await transporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: email,
+          subject: "StudyHive Verification OTP",
+          text: `Your OTP is ${otp}. It expires in 10 minutes.`,
+        });
+        console.log(`[AUTH] OTP email sent successfully to ${email}`);
+      } catch (emailError) {
+        console.error(`[AUTH] Failed to send OTP email:`, emailError);
+        // Don't fail the request, but maybe return a warning?
+        // Or should we fail? If we don't fail, the user can't verify.
+        // Let's fail for now so they know something is wrong.
+        throw new Error(`Email sending failed: ${(emailError as Error).message}`);
+      }
     } else {
-      console.log(`[DEV] OTP for ${email}: ${otp}`);
+      console.log(`[DEV] OTP for ${email}: ${otp} (Email credentials not set)`);
     }
 
     res.status(201).json({
