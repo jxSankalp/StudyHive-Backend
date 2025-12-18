@@ -1,7 +1,7 @@
 // src/controllers/whiteboardController.ts
+/// <reference path="../types/index.d.ts" />
 import { Request, Response } from "express";
 import { Whiteboard } from "../models/whiteboardModel";
-import { getAuth } from "@clerk/express";
 import mongoose from "mongoose";
 
 // @desc    Create a new whiteboard
@@ -9,7 +9,7 @@ import mongoose from "mongoose";
 // @access  Protected
 export const createWhiteboard = async (req: Request, res: Response) => {
   const { name, groupId } = req.body;
-  const { userId } = getAuth(req);
+  const userId = req.user?.userId;
 
   if (!userId) {
     res.status(401).json({ message: "Not authenticated" });
@@ -26,7 +26,7 @@ export const createWhiteboard = async (req: Request, res: Response) => {
     const whiteboard = await Whiteboard.create({
       title: name, // Use 'title' to match the schema
       chat: groupId, // Use 'chat' to match the schema
-      createdBy: userId, // Keep using the Clerk userId string
+      createdBy: userId, // Use authenticated user ID
       data: {}, // Provide a default empty object for the initial state
     });
 
@@ -49,7 +49,7 @@ export const getWhiteboardsByGroup = async (req: Request, res: Response) => {
   const { groupId } = req.params; // This correctly gets the ID from the URL
 
   try {
-    const whiteboards = await Whiteboard.find({ chat: groupId }).sort({ createdAt: -1 }); // <-- Change `groupId` to `chat`
+    const whiteboards = await Whiteboard.find({ chat: groupId }).sort({ createdAt: -1 });
 
     res.status(200).json({
       success: true,

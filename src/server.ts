@@ -5,14 +5,14 @@ import { createServer } from "http";
 import { initSocket } from "./socket"; 
 import userRoutes from "./routes/userRoutes";
 import chatRoutes from "./routes/chatRoutes";
-import webhookRouter from "./routes/webhooks";
+import authRoutes from "./routes/authRoutes";
 import messageRoutes from "./routes/messageRoutes";
 import notesRoutes from "./routes/notesRoutes";
-import { clerkMiddleware } from "@clerk/express";
 import { connectDB } from "./config/db";
 import videoRoutes from "./routes/videoRoutes";
 import whiteboardRoutes from "./routes/whiteboardRoutes";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 
 dotenv.config();
 
@@ -24,16 +24,15 @@ app.use(cors({
     credentials: true,
 }));
 
-// Need to be before express.json() for svix webhook raw body
-app.use("/api/webhooks", webhookRouter);
-app.use(clerkMiddleware());
 app.use(express.json());
+app.use(cookieParser());
 
 // Connect to DB
 connectDB();
 
 // Routes
-app.use("/api/meet", videoRoutes); 
+app.use("/api/auth", authRoutes);
+app.use("/api/meet", videoRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/messages", messageRoutes);

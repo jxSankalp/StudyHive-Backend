@@ -6,8 +6,12 @@ import {
   removeFromGroup,
   renameGroup,
 } from "../controllers/chatController";
+import { authMiddleware } from "../middleware/authMiddleware";
 
 const router = express.Router();
+
+// Protect all routes with authentication
+router.use(authMiddleware);
 
 router.get("/", getAllChats);
 router.post("/", createGroupChat);

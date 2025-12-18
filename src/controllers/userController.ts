@@ -1,3 +1,4 @@
+/// <reference path="../types/index.d.ts" />
 import { Request, Response } from "express";
 import {
   createUserInDB,
@@ -7,20 +8,21 @@ import {
 } from "../services/user.service";
 import { User } from "../models/userModel";
 import { UpdateUserParams } from "../types/user";
-import { getAuth } from "@clerk/express";
 
 export const getCurrentUser = async (req: Request, res: Response) => {
-  const { userId } = getAuth(req);
-  console.log("Authenticated Clerk userId:", userId);
+  const userId = req.user?.userId;
+  console.log("Authenticated userId:", userId);
 
   if (!userId) {
     res.status(401).json({ error: "Unauthorized" });
+    return;
   }
 
   try {
-    const user = await User.findOne({ clerkId: userId }).select("clerkId username photo");
+    const user = await User.findById(userId).select("_id username email photo");
     if (!user) {
       res.status(404).json({ error: "User not found in DB" });
+      return;
     }
 
     res.json(user);
@@ -95,7 +97,7 @@ export const deleteUser = async (
 export const searchUsers = async (req: Request, res: Response) => {
   const { query } = req.query;
 
-  const { userId } = getAuth(req);
+  const userId = req.user?.userId;
 
   if (!query || typeof query !== "string") {
     res.status(400).json({ error: "Query is required" });
@@ -105,8 +107,8 @@ export const searchUsers = async (req: Request, res: Response) => {
   try {
     const users = await User.find({
       username: { $regex: new RegExp("^" + query, "i") },
-      clerkId: { $ne: userId }, // starts with query, case-insensitive
-    }).select("clerkId username");
+      _id: { $ne: userId }, // starts with query, case-insensitive
+    }).select("_id username email");
 
     res.json({ users });  
   } catch (err) {

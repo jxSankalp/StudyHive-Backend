@@ -1,5 +1,5 @@
+/// <reference path="../types/index.d.ts" />
 import { Request, Response } from "express";
-import { getAuth } from "@clerk/express";
 import { User } from "../models/userModel";
 import { Chat } from "../models/chatModel";
 
@@ -8,20 +8,20 @@ export const getAllChats = async (
   res: Response
 ): Promise<void> => {
   try {
-    const { userId } = getAuth(req);
+    const userId = req.user?.userId;
 
     if (!userId) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
 
-    const user = await User.findOne({ clerkId: userId }).populate("chats");
-    if (!user) {
-      res.status(404).json({ error: "User not found" });
-      return;
-    }
+    const chats = await Chat.find({ users: { $elemMatch: { $eq: userId } } })
+      .populate("users", "-password")
+      .populate("groupAdmin", "-password")
+      .populate("latestMessage")
+      .sort({ updatedAt: -1 });
 
-    res.status(200).json({ chats: user.chats });
+    res.status(200).json({ chats });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -32,7 +32,7 @@ export const createGroupChat = async (
   res: Response
 ): Promise<void> => {
   try {
-    const { userId } = getAuth(req);
+    const userId = req.user?.userId;
 
     if (!userId) {
       res.status(401).json({ error: "Unauthorized" });
@@ -46,11 +46,11 @@ export const createGroupChat = async (
       return;
     }
 
-    // Fetch users from clerkIds
-    const participants = await User.find({ clerkId: { $in: users } });
+    // Fetch users from user IDs
+    const participants = await User.find({ _id: { $in: users } });
 
     // Also fetch the creator
-    const admin = await User.findOne({ clerkId: userId });
+    const admin = await User.findById(userId);
     if (!admin) {
       res.status(404).json({ error: "Admin user not found" });
       return;
@@ -74,7 +74,7 @@ export const createGroupChat = async (
 
     const populatedGroup = await newGroup.populate(
       "users",
-      "username photo clerkId"
+      "username photo email"
     );
 
     res.status(201).json({ group: populatedGroup });
@@ -135,7 +135,7 @@ export const removeFromGroup = async (req: Request, res: Response) => {
 };
 
 export const addToGroup = async (req: Request, res: Response) => {
-  const { chatId, userIds } = req.body; // userIds = array of clerkIds
+  const { chatId, userIds } = req.body; // userIds = array of MongoDB _ids
 
   if (!Array.isArray(userIds) || userIds.length === 0) {
     res.status(400).json({ error: "No users provided" });
@@ -143,7 +143,7 @@ export const addToGroup = async (req: Request, res: Response) => {
   }
 
   try {
-    const users = await User.find({ clerkId: { $in: userIds } });
+    const users = await User.find({ _id: { $in: userIds } });
 
     if (users.length === 0) {
       res.status(404).json({ error: "No matching users found" });
@@ -161,8 +161,8 @@ export const addToGroup = async (req: Request, res: Response) => {
       },
       { new: true }
     )
-      .populate("users", "username photo clerkId")
-      .populate("groupAdmin", "username photo clerkId");
+      .populate("users", "username photo email")
+      .populate("groupAdmin", "username photo email");
 
     if (!updatedChat) {
       res.status(404).json({ error: "Chat not found" });

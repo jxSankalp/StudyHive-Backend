@@ -1,22 +1,21 @@
+/// <reference path="../types/index.d.ts" />
 import { Request, Response } from "express";
 import { streamClient } from "../lib/StreamClient";
 import { Chat } from "../models/chatModel";
 import { User } from "../models/userModel";
 import { Meeting } from "../models/meetingModel";
-import { getAuth } from "@clerk/express";
-// import { getAuth } from "@clerk/nextjs/server";
 
 export const createVideoCall = async (req: Request, res: Response): Promise<void> => {
   const { chatId, meetName } = req.body;
 
-  const { userId } = getAuth(req);
+  const userId = req.user?.userId;
 
   if (!userId) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
 
-  const user = await User.findOne({ clerkId: userId });
+  const user = await User.findById(userId);
 
   if (!user) {
     res.status(401).json({ error: "User not found in DB" });
@@ -34,7 +33,7 @@ export const createVideoCall = async (req: Request, res: Response): Promise<void
     const callType = "default";
 
     const streamUsers = chat.users.map((user: any) => ({
-      id: user.clerkId,
+      id: user._id.toString(),
       name: user.username,
       image: user.photo,
       role: "user",
@@ -45,13 +44,13 @@ export const createVideoCall = async (req: Request, res: Response): Promise<void
     const call = streamClient.video.call(callType, callId);
     await call.create({
       data: {
-        created_by_id: userId,
+        created_by_id: user._id.toString(),
         members: streamUsers.map((u) => ({ user_id: u.id })),
       },
     });
 
     const dbParticipants = await User.find({
-      clerkId: { $in: streamUsers.map((u) => u.id) },
+      _id: { $in: streamUsers.map((u) => u.id) },
     });
 
     const meeting = await Meeting.create({
@@ -81,11 +80,11 @@ export const createVideoCall = async (req: Request, res: Response): Promise<void
 
 
 export const generateUserToken = async (req: Request, res: Response):Promise<void>  => {
-  const { clerkId } = req.body;
+  const { userId } = req.body;
 
   try {
     const token = streamClient.generateUserToken({
-      user_id: clerkId,
+      user_id: userId,
       validity_in_seconds: 3600,
     });
 

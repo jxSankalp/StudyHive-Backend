@@ -1,5 +1,5 @@
+/// <reference path="../types/index.d.ts" />
 import { Request, Response } from "express";
-import { getAuth } from "@clerk/express";
 import { User } from "../models/userModel";
 import { Chat } from "../models/chatModel";
 import { Message } from "../models/messageModel";
@@ -12,7 +12,7 @@ export const allMessages = async (
 
     const chatId = req.params.chatId;
     const messages = await Message.find({ chat: chatId })
-      .populate("sender", "username photo email clerkId")
+      .populate("sender", "username photo email")
       .populate("chat");
     res.json(messages);
   } catch (error: any) {
@@ -26,14 +26,14 @@ export const sendMessage = async (
   res: Response
 ): Promise<void> => {
   try {
-    const { userId } = getAuth(req);
+    const userId = req.user?.userId;
 
     if (!userId) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
 
-    const user = await User.findOne({ clerkId: userId });
+    const user = await User.findById(userId);
 
     if (!user) {
       res.status(401).json({ error: "Unauthorized" });
@@ -59,7 +59,7 @@ export const sendMessage = async (
 
       // Populate sender and nested chat.users using lean()
       const fullMessage = await Message.findById(createdMessage._id)
-        .populate("sender", "username photo clerkId")
+        .populate("sender", "username photo email")
         .populate({
           path: "chat",
           populate: {

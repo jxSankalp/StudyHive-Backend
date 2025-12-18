@@ -6,9 +6,13 @@ import {
   getWhiteboardById,
   saveWhiteboardState,
 } from "../controllers/whiteBoardController";
+import { authMiddleware } from "../middleware/authMiddleware";
 
 
 const router = Router();
+
+// Protect all routes
+router.use(authMiddleware);
 
 router.route("/").post(createWhiteboard);
 router.route("/group/:groupId").get(getWhiteboardsByGroup);
