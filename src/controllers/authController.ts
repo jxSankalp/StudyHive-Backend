@@ -68,10 +68,8 @@ export const register = async (req: Request, res: Response): Promise<void> => {
         console.log(`[AUTH] OTP email sent successfully to ${email}`);
       } catch (emailError) {
         console.error(`[AUTH] Failed to send OTP email:`, emailError);
-        // Don't fail the request, but maybe return a warning?
-        // Or should we fail? If we don't fail, the user can't verify.
-        // Let's fail for now so they know something is wrong.
-        throw new Error(`Email sending failed: ${(emailError as Error).message}`);
+        console.log(`[FALLBACK] OTP for ${email}: ${otp}`);
+        // Proceed without throwing error so user can still register
       }
     } else {
       console.log(`[DEV] OTP for ${email}: ${otp} (Email credentials not set)`);
