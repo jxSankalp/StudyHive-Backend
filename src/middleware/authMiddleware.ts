@@ -1,12 +1,6 @@
 /// <reference path="../types/index.d.ts" />
 import { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken";
-
-const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key-change-this";
-
-interface JwtPayload {
-  userId: string;
-}
+import { supabase } from "../lib/supabase";
 
 export const authMiddleware = async (
   req: Request,
@@ -14,15 +8,27 @@ export const authMiddleware = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const token = req.cookies.jwt;
+    // Accept Bearer token from Authorization header OR cookie
+    const authHeader = req.headers.authorization;
+    const token =
+      authHeader?.startsWith("Bearer ")
+        ? authHeader.slice(7)
+        : req.cookies?.access_token;
 
     if (!token) {
       res.status(401).json({ message: "Not authenticated" });
       return;
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
-    req.user = decoded;
+    // Verify via Supabase (validates the JWT signature against your project)
+    const { data, error } = await supabase.auth.getUser(token);
+
+    if (error || !data.user) {
+      res.status(401).json({ message: "Invalid or expired token" });
+      return;
+    }
+
+    req.user = { userId: data.user.id };
     next();
   } catch (error) {
     console.error("Auth middleware error:", error);

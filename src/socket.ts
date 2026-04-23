@@ -1,9 +1,7 @@
 // socket.ts
 import { Server } from "socket.io";
 import type { Server as HTTPServer } from "http";
-import type { Chat, Message } from "./types/user";
-import { Notes } from "./models/notesModel";
-import { Whiteboard } from "./models/whiteboardModel";
+import { supabase } from "./lib/supabase";
 
 let io: Server;
 
@@ -26,14 +24,13 @@ export const initSocket = (server: HTTPServer) => {
       console.log(userId + " Joined Chat room: " + room);
     });
 
-    socket.on("new message", (newMessageRecieved: Message) => {
-      const chat = newMessageRecieved.chat as Chat;
-
-      if (!chat.users) return console.log("chat.users not defined");
-      socket.in(chat._id).emit("message recieved", newMessageRecieved);
+    socket.on("new message", (newMessageRecieved: any) => {
+      const chat = newMessageRecieved.chat;
+      if (!chat?.users) return console.log("chat.users not defined");
+      socket.in(chat.id || chat._id).emit("message recieved", newMessageRecieved);
     });
 
-    socket.on("note:join", (noteId: string , userId: string) => {
+    socket.on("note:join", (noteId: string, userId: string) => {
       socket.join(noteId);
       console.log(`${userId} joined notes room: ${noteId}`);
     });
@@ -44,13 +41,13 @@ export const initSocket = (server: HTTPServer) => {
 
     socket.on("note:save", async ({ noteId, content }) => {
       try {
-        await Notes.findByIdAndUpdate(noteId, { content });
+        await supabase.from("notes").update({ content }).eq("id", noteId);
         console.log(`Note ${noteId} saved to DB`);
       } catch (error) {
         console.error("Error saving note:", error);
       }
     });
-       // New WebSocket Events for Whiteboard
+
     socket.on("whiteboard:join", (whiteboardId: string, userId: string) => {
       socket.join(whiteboardId);
       console.log(`${userId} joined whiteboard room: ${whiteboardId}`);
@@ -63,21 +60,16 @@ export const initSocket = (server: HTTPServer) => {
 
     socket.on("whiteboard:save", async ({ whiteboardId, whiteboardData }) => {
       try {
-        await Whiteboard.findByIdAndUpdate(
-          whiteboardId,
-          { data: whiteboardData }
-        );
+        await supabase
+          .from("whiteboards")
+          .update({ data: whiteboardData })
+          .eq("id", whiteboardId);
         console.log(`Whiteboard ${whiteboardId} saved to DB`);
       } catch (error) {
         console.error("Error saving whiteboard:", error);
       }
     });
-  // });
-
-  
   });
-
-  
 
   return io;
 };

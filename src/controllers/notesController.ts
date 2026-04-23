@@ -1,27 +1,28 @@
 /// <reference path="../types/index.d.ts" />
 import { Request, Response } from "express";
-import { User } from "../models/userModel";
-import { Notes } from "../models/notesModel";
+import { supabase } from "../lib/supabase";
 
 export const allNotes = async (req: Request, res: Response): Promise<void> => {
   try {
-    const chatId = req.params.chatId || req.query.chatId;
-
+    const chatId = req.params.chatId || (req.query.chatId as string);
     if (!chatId) {
       res.status(400).json({ error: "Chat ID is required" });
       return;
     }
 
-    const notes = await Notes.find({ chat: chatId })
-      .select("-content")
-      .populate("createdBy", "username email");
+    const { data, error } = await supabase
+      .from("notes")
+      .select(
+        `id, name, chat_id, created_at, updated_at,
+         created_by:profiles!notes_created_by_id_fkey ( id, username, email )`
+      )
+      .eq("chat_id", chatId)
+      .order("created_at", { ascending: false });
 
-    res.json({
-      data: [...notes],
-    });
+    if (error) throw error;
+    res.json({ data });
   } catch (error: any) {
-    res.status(400);
-    throw new Error(error.message);
+    res.status(500).json({ error: error.message });
   }
 };
 
@@ -30,46 +31,31 @@ export const createNote = async (
   res: Response
 ): Promise<void> => {
   const userId = req.user?.userId;
-
   if (!userId) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
 
-  const user = await User.findById(userId);
-
-  if (!user) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
-
   const { content, name, chatId } = req.body;
-
   if (!content || !chatId || !name) {
-    console.log("Invalid data passed into request");
-    res.sendStatus(400);
+    res.status(400).json({ error: "content, name and chatId are required" });
     return;
   }
-
-  const newNote = {
-    name,
-    createdBy: user._id,
-    content,
-    chat: chatId,
-  };
 
   try {
-    const note = await Notes.create(newNote);
+    const { data, error } = await supabase
+      .from("notes")
+      .insert({ name, content, chat_id: chatId, created_by_id: userId })
+      .select(
+        `id, name, content, chat_id, created_at,
+         created_by:profiles!notes_created_by_id_fkey ( id, username, email )`
+      )
+      .single();
 
-    const fullNote = await Notes.findById(note._id).populate(
-      "createdBy",
-      "username email"
-    );
-
-    res.json(fullNote);
+    if (error) throw error;
+    res.json(data);
   } catch (error: any) {
-    res.status(400);
-    throw new Error(error.message);
+    res.status(500).json({ error: error.message });
   }
 };
 
@@ -78,20 +64,20 @@ export const getNoteById = async (
   res: Response
 ): Promise<void> => {
   try {
-    const id  = req.params.notesId;
-    const note = await Notes.findById(id).populate(
-      "createdBy",
-      "username email"
-    );
+    const { data, error } = await supabase
+      .from("notes")
+      .select(
+        `id, name, content, chat_id, created_at,
+         created_by:profiles!notes_created_by_id_fkey ( id, username, email )`
+      )
+      .eq("id", req.params.notesId)
+      .single();
 
-    if (!note) {
+    if (error || !data) {
       res.status(404).json({ error: "Note not found" });
       return;
     }
-
-    res.json({
-      data: note,
-    });
+    res.json({ data });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -102,79 +88,71 @@ export const deleteNote = async (
   res: Response
 ): Promise<void> => {
   const userId = req.user?.userId;
-
   if (!userId) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
 
   try {
-    const id = req.params.notesId;
+    const { data: note, error: findErr } = await supabase
+      .from("notes")
+      .select("id, created_by_id")
+      .eq("id", req.params.notesId)
+      .single();
 
-    const note = await Notes.findById(id);
-
-    if (!note) {
+    if (findErr || !note) {
       res.status(404).json({ error: "Note not found" });
       return;
     }
 
-    if(!note.createdBy){
-      res.status(400).json({ error: "Note does not have a creator" });
+    if (note.created_by_id !== userId) {
+      res.status(403).json({ error: "Not allowed to delete this note" });
       return;
     }
 
-    // Get user from DB to get their _id
-    const user = await User.findById(userId);
+    const { error: delErr } = await supabase
+      .from("notes")
+      .delete()
+      .eq("id", note.id);
 
-    if (!user || note.createdBy.toString() !== user._id.toString()) {
-      res
-        .status(403)
-        .json({ error: "You are not allowed to delete this note" });
-      return;
-    }
-
-    await note.deleteOne();
-
-    res.json({
-      message: "Note deleted successfully",
-    });
+    if (delErr) throw delErr;
+    res.json({ message: "Note deleted successfully" });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 };
 
-export const updateNote = async (req: Request, res: Response): Promise<void> => {
+export const updateNote = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  const userId = req.user?.userId;
+  if (!userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
   const { notesId } = req.params;
   const { content, name } = req.body;
-  const userId = req.user?.userId;
-
-  if (!userId) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
 
   try {
-    const note = await Notes.findById(notesId);
+    const updates: Record<string, any> = {};
+    if (content !== undefined) updates.content = content;
+    if (name !== undefined) updates.name = name;
 
-    if (!note) {
+    const { data, error } = await supabase
+      .from("notes")
+      .update(updates)
+      .eq("id", notesId)
+      .select()
+      .single();
+
+    if (error || !data) {
       res.status(404).json({ error: "Note not found" });
       return;
     }
-
-    // Check ownership or permissions if needed
-    // if (note.createdBy.toString() !== userId) { ... }
-
-    if (content !== undefined) note.content = content;
-    if (name !== undefined) note.name = name;
-
-    await note.save();
-
-    res.json({
-      message: "Note updated successfully",
-      data: note,
-    });
+    res.json({ message: "Note updated successfully", data });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 };
-

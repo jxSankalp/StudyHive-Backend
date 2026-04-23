@@ -1,12 +1,8 @@
 // src/controllers/whiteboardController.ts
 /// <reference path="../types/index.d.ts" />
 import { Request, Response } from "express";
-import { Whiteboard } from "../models/whiteboardModel";
-import mongoose from "mongoose";
+import { supabase } from "../lib/supabase";
 
-// @desc    Create a new whiteboard
-// @route   POST /api/whiteboards
-// @access  Protected
 export const createWhiteboard = async (req: Request, res: Response) => {
   const { name, groupId } = req.body;
   const userId = req.user?.userId;
@@ -16,109 +12,85 @@ export const createWhiteboard = async (req: Request, res: Response) => {
     return;
   }
 
-  // Check if groupId is a valid ObjectId
-  if (!mongoose.Types.ObjectId.isValid(groupId)) {
-    res.status(400).json({ message: "Invalid group ID" });
-    return 
+  if (!groupId || !name) {
+    res.status(400).json({ message: "name and groupId are required" });
+    return;
   }
 
   try {
-    const whiteboard = await Whiteboard.create({
-      title: name, // Use 'title' to match the schema
-      chat: groupId, // Use 'chat' to match the schema
-      createdBy: userId, // Use authenticated user ID
-      data: {}, // Provide a default empty object for the initial state
-    });
+    const { data, error } = await supabase
+      .from("whiteboards")
+      .insert({ title: name, chat_id: groupId, created_by_id: userId, data: {} })
+      .select()
+      .single();
 
-    res.status(201).json({
-      success: true,
-      data: whiteboard,
-    });
+    if (error) throw error;
+
+    res.status(201).json({ success: true, data });
   } catch (error: any) {
     console.error(error);
-    res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    res.status(500).json({ message: "Server error", error: error.message });
   }
 };
-
-
 
 export const getWhiteboardsByGroup = async (req: Request, res: Response) => {
-  const { groupId } = req.params; // This correctly gets the ID from the URL
+  const { groupId } = req.params;
 
   try {
-    const whiteboards = await Whiteboard.find({ chat: groupId }).sort({ createdAt: -1 });
+    const { data, error } = await supabase
+      .from("whiteboards")
+      .select("id, title, created_by_id, created_at, updated_at")
+      .eq("chat_id", groupId)
+      .order("created_at", { ascending: false });
 
-    res.status(200).json({
-      success: true,
-      data: whiteboards,
-    });
+    if (error) throw error;
+    res.status(200).json({ success: true, data });
   } catch (error: any) {
     console.error(error);
-    res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// @desc    Get a single whiteboard by ID
-// @route   GET /api/whiteboards/:id
-// @access  Protected
 export const getWhiteboardById = async (req: Request, res: Response) => {
   const { id } = req.params;
 
   try {
-    const whiteboard = await Whiteboard.findById(id);
+    const { data, error } = await supabase
+      .from("whiteboards")
+      .select("*")
+      .eq("id", id)
+      .single();
 
-    if (!whiteboard) {
+    if (error || !data) {
       res.status(404).json({ message: "Whiteboard not found" });
       return;
     }
-
-    res.status(200).json({
-      success: true,
-      data: whiteboard,
-    });
+    res.status(200).json({ success: true, data });
   } catch (error: any) {
     console.error(error);
-    res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// @desc    Save the whiteboard's state
-// @route   PUT /api/whiteboards/:id/save
-// @access  Protected
 export const saveWhiteboardState = async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { data } = req.body;
+  const { data: whiteboardData } = req.body;
 
   try {
-    const whiteboard = await Whiteboard.findByIdAndUpdate(
-      id,
-      { data, updatedAt: new Date() },
-      { new: true }
-    );
+    const { data, error } = await supabase
+      .from("whiteboards")
+      .update({ data: whiteboardData, updated_at: new Date().toISOString() })
+      .eq("id", id)
+      .select()
+      .single();
 
-    if (!whiteboard) {
+    if (error || !data) {
       res.status(404).json({ message: "Whiteboard not found" });
       return;
     }
-
-    res.status(200).json({
-      success: true,
-      data: whiteboard,
-    });
+    res.status(200).json({ success: true, data });
   } catch (error: any) {
     console.error(error);
-    res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    res.status(500).json({ message: "Server error", error: error.message });
   }
 };

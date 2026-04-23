@@ -1,13 +1,13 @@
 /// <reference path="../types/index.d.ts" />
 import { Request, Response } from "express";
+import { supabase } from "../lib/supabase";
 import { streamClient } from "../lib/StreamClient";
-import { Chat } from "../models/chatModel";
-import { User } from "../models/userModel";
-import { Meeting } from "../models/meetingModel";
 
-export const createVideoCall = async (req: Request, res: Response): Promise<void> => {
+export const createVideoCall = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   const { chatId, meetName } = req.body;
-
   const userId = req.user?.userId;
 
   if (!userId) {
@@ -15,16 +15,30 @@ export const createVideoCall = async (req: Request, res: Response): Promise<void
     return;
   }
 
-  const user = await User.findById(userId);
-
-  if (!user) {
-    res.status(401).json({ error: "User not found in DB" });
-    return;
-  }
-
   try {
-    const chat = await Chat.findById(chatId).populate("users");
-    if (!chat) {
+    // Fetch the caller's profile
+    const { data: profile, error: profileErr } = await supabase
+      .from("profiles")
+      .select("id, username, photo")
+      .eq("id", userId)
+      .single();
+
+    if (profileErr || !profile) {
+      res.status(401).json({ error: "User not found in DB" });
+      return;
+    }
+
+    // Fetch the chat with its members
+    const { data: chat, error: chatErr } = await supabase
+      .from("chats")
+      .select(
+        `id, chat_name,
+         chat_members ( user_id, profiles ( id, username, photo ) )`
+      )
+      .eq("id", chatId)
+      .single();
+
+    if (chatErr || !chat) {
       res.status(404).json({ error: "Chat not found" });
       return;
     }
@@ -32,10 +46,10 @@ export const createVideoCall = async (req: Request, res: Response): Promise<void
     const callId = `call-${chatId}-${Date.now()}`;
     const callType = "default";
 
-    const streamUsers = chat.users.map((user: any) => ({
-      id: user._id.toString(),
-      name: user.username,
-      image: user.photo,
+    const streamUsers = (chat.chat_members as any[]).map((m) => ({
+      id: m.profiles.id,
+      name: m.profiles.username,
+      image: m.profiles.photo ?? "",
       role: "user",
     }));
 
@@ -44,31 +58,40 @@ export const createVideoCall = async (req: Request, res: Response): Promise<void
     const call = streamClient.video.call(callType, callId);
     await call.create({
       data: {
-        created_by_id: user._id.toString(),
+        created_by_id: userId,
         members: streamUsers.map((u) => ({ user_id: u.id })),
       },
     });
 
-    const dbParticipants = await User.find({
-      _id: { $in: streamUsers.map((u) => u.id) },
-    });
+    // Persist meeting in Supabase
+    const { data: meeting, error: meetErr } = await supabase
+      .from("meetings")
+      .insert({
+        call_id: callId,
+        name: meetName || `Meeting for ${chat.chat_name}`,
+        chat_id: chatId,
+        created_by_id: userId,
+        status: "scheduled",
+        duration: "30 mins",
+        scheduled_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
 
-    const meeting = await Meeting.create({
-      callId,
-      name: meetName || `Meeting for ${chat.chatName}`,
-      chatId: chat._id,
-      participants: dbParticipants.map((u) => u._id),
-      createdBy: user._id,
-      scheduled_at: new Date(),
-      status: "scheduled",
-      duration: "30 mins",
-    });
+    if (meetErr) throw meetErr;
+
+    // Insert participants
+    const participantRows = streamUsers.map((u) => ({
+      meeting_id: meeting.id,
+      user_id: u.id,
+    }));
+    await supabase.from("meeting_participants").insert(participantRows);
 
     res.status(200).json({
-      id: meeting.callId,
+      id: meeting.call_id,
       name: meeting.name,
       status: meeting.status,
-      participants: meeting.participants.length,
+      participants: streamUsers.length,
       duration: meeting.duration,
       scheduled_at: meeting.scheduled_at,
     });
@@ -78,35 +101,43 @@ export const createVideoCall = async (req: Request, res: Response): Promise<void
   }
 };
 
-
-export const generateUserToken = async (req: Request, res: Response):Promise<void>  => {
+export const generateUserToken = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   const { userId } = req.body;
-
   try {
     const token = streamClient.generateUserToken({
       user_id: userId,
       validity_in_seconds: 3600,
     });
-
     res.status(200).json({ token });
-    return ;
   } catch (err) {
     res.status(500).json({ error: "Token generation failed", details: err });
-    return;
   }
 };
 
-export const getMeetingsForChat = async (req: Request, res: Response): Promise<void> => {
+export const getMeetingsForChat = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   const { chatId } = req.params;
-
   try {
-    const meetings = await Meeting.find({ chatId }).populate("participants");
+    const { data: meetings, error } = await supabase
+      .from("meetings")
+      .select(
+        `id, call_id, name, status, duration, scheduled_at,
+         meeting_participants ( user_id )`
+      )
+      .eq("chat_id", chatId);
 
-    const formatted = meetings.map((m) => ({
-      id: m.callId,
+    if (error) throw error;
+
+    const formatted = (meetings ?? []).map((m) => ({
+      id: m.call_id,
       name: m.name || "Untitled Room",
       status: m.status || "scheduled",
-      participants: m.participants?.length || 0,
+      participants: m.meeting_participants?.length || 0,
       duration: m.duration || "30 mins",
       scheduledTime: new Date(m.scheduled_at).toLocaleTimeString([], {
         hour: "2-digit",

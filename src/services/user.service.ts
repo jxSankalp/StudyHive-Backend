@@ -1,27 +1,10 @@
-import { User } from "../models/userModel";
-import { CreateUserParams, UpdateUserParams } from "../types/user";
+// user.service.ts — deprecated after Supabase migration.
+// All user DB logic is now directly in userController.ts using the Supabase client.
+// This file is kept as a no-op stub to avoid breaking any old imports.
 
-export const createUserInDB = async (params: CreateUserParams) => {
-  const { email, username, password, photo } = params;
-  return await User.create({ email, username, password, photo });
-};
+import { UpdateUserParams } from "../types/user";
 
-export const getUserByIdFromDB = async (userId: string) => {
-  return await User.findById(userId);
-};
-
-export const updateUserInDB = async (
-  userId: string,
-  params: UpdateUserParams
-) => {
-  const { username, photo } = params;
-  return await User.findByIdAndUpdate(
-    userId,
-    { username, photo },
-    { new: true }
-  );
-};
-
-export const deleteUserFromDB = async (userId: string) => {
-  return await User.findByIdAndDelete(userId);
-};
+export const createUserInDB = async (_params: any) => null;
+export const getUserByIdFromDB = async (_userId: string) => null;
+export const updateUserInDB = async (_userId: string, _params: UpdateUserParams) => null;
+export const deleteUserFromDB = async (_userId: string) => null;

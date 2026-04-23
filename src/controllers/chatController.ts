@@ -1,7 +1,6 @@
 /// <reference path="../types/index.d.ts" />
 import { Request, Response } from "express";
-import { User } from "../models/userModel";
-import { Chat } from "../models/chatModel";
+import { supabase } from "../lib/supabase";
 
 export const getAllChats = async (
   req: Request,
@@ -9,20 +8,42 @@ export const getAllChats = async (
 ): Promise<void> => {
   try {
     const userId = req.user?.userId;
-
     if (!userId) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
 
-    const chats = await Chat.find({ users: { $elemMatch: { $eq: userId } } })
-      .populate("users", "-password")
-      .populate("groupAdmin", "-password")
-      .populate("latestMessage")
-      .sort({ updatedAt: -1 });
+    // Get all chat_members rows for this user, then fetch the chats
+    const { data: memberRows, error: memberError } = await supabase
+      .from("chat_members")
+      .select("chat_id")
+      .eq("user_id", userId);
+
+    if (memberError) throw memberError;
+
+    const chatIds = memberRows?.map((r) => r.chat_id) ?? [];
+    if (chatIds.length === 0) {
+      res.status(200).json({ chats: [] });
+      return;
+    }
+
+    const { data: chats, error: chatsError } = await supabase
+      .from("chats")
+      .select(
+        `
+        id, chat_name, description, group_admin_id, latest_message_id, created_at, updated_at,
+        chat_members ( user_id, profiles ( id, username, email, photo ) ),
+        messages!chats_latest_message_id_fkey ( id, content, created_at )
+      `
+      )
+      .in("id", chatIds)
+      .order("updated_at", { ascending: false });
+
+    if (chatsError) throw chatsError;
 
     res.status(200).json({ chats });
   } catch (err: any) {
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 };
@@ -32,54 +53,43 @@ export const createGroupChat = async (
   res: Response
 ): Promise<void> => {
   try {
-    const userId = req.user?.userId;
-
-    if (!userId) {
+    const adminId = req.user?.userId;
+    if (!adminId) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
 
-    const { name, description, users } = req.body;
-
+    const { name, description, users } = req.body; // users = array of user UUIDs
     if (!name || !Array.isArray(users) || users.length === 0) {
       res.status(400).json({ error: "All fields are required" });
       return;
     }
 
-    // Fetch users from user IDs
-    const participants = await User.find({ _id: { $in: users } });
+    // Create the chat row
+    const { data: chat, error: chatError } = await supabase
+      .from("chats")
+      .insert({ chat_name: name, description, group_admin_id: adminId })
+      .select()
+      .single();
 
-    // Also fetch the creator
-    const admin = await User.findById(userId);
-    if (!admin) {
-      res.status(404).json({ error: "Admin user not found" });
-      return;
-    }
+    if (chatError) throw chatError;
 
-    // Combine all members
-    const allUsers = [...participants, admin];
+    // Add all members including the admin
+    const allUserIds = Array.from(new Set([...users, adminId]));
+    const memberRows = allUserIds.map((uid) => ({
+      chat_id: chat.id,
+      user_id: uid,
+    }));
 
-    const newGroup = await Chat.create({
-      chatName: name,
-      description,
-      users: allUsers.map((u) => u._id),
-      groupAdmin: admin._id,
-    });
+    const { error: memberError } = await supabase
+      .from("chat_members")
+      .insert(memberRows);
 
-    // Add this chat to each user's chats
-    for (const user of allUsers) {
-      user.chats.push(newGroup._id);
-      await user.save();
-    }
+    if (memberError) throw memberError;
 
-    const populatedGroup = await newGroup.populate(
-      "users",
-      "username photo email"
-    );
-
-    res.status(201).json({ group: populatedGroup });
+    res.status(201).json({ group: chat });
   } catch (err: any) {
-    console.log(err);
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 };
@@ -87,23 +97,15 @@ export const createGroupChat = async (
 export const renameGroup = async (req: Request, res: Response) => {
   const { chatId, chatName } = req.body;
   try {
-    const updatedChat = await Chat.findByIdAndUpdate(
-      chatId,
-      {
-        chatName: chatName,
-      },
-      {
-        new: true,
-      }
-    )
-      .populate("users")
-      .populate("groupAdmin");
+    const { data, error } = await supabase
+      .from("chats")
+      .update({ chat_name: chatName })
+      .eq("id", chatId)
+      .select()
+      .single();
 
-    if (!updatedChat) {
-      res.status(404).json({ error: "Chat Not Found" });
-    } else {
-      res.json(updatedChat);
-    }
+    if (error) throw error;
+    res.json(data);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -112,72 +114,48 @@ export const renameGroup = async (req: Request, res: Response) => {
 export const removeFromGroup = async (req: Request, res: Response) => {
   const { chatId, userId } = req.body;
   try {
-    const removed = await Chat.findByIdAndUpdate(
-      chatId,
-      {
-        $pull: { users: userId },
-      },
-      {
-        new: true,
-      }
-    )
-      .populate("users")
-      .populate("groupAdmin");
+    const { error } = await supabase
+      .from("chat_members")
+      .delete()
+      .eq("chat_id", chatId)
+      .eq("user_id", userId);
 
-    if (!removed) {
-      res.status(404).json({ error: "Chat Not Found" });
-    } else {
-      res.json(removed);
-    }
+    if (error) throw error;
+    res.json({ message: "User removed" });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 };
 
 export const addToGroup = async (req: Request, res: Response) => {
-  const { chatId, userIds } = req.body; // userIds = array of MongoDB _ids
-
+  const { chatId, userIds } = req.body;
   if (!Array.isArray(userIds) || userIds.length === 0) {
     res.status(400).json({ error: "No users provided" });
     return;
   }
 
   try {
-    const users = await User.find({ _id: { $in: userIds } });
+    const rows = userIds.map((uid: string) => ({
+      chat_id: chatId,
+      user_id: uid,
+    }));
 
-    if (users.length === 0) {
-      res.status(404).json({ error: "No matching users found" });
-      return;
-    }
+    const { error } = await supabase
+      .from("chat_members")
+      .upsert(rows, { onConflict: "chat_id,user_id" });
 
-    const userObjectIds = users.map((u) => u._id);
+    if (error) throw error;
 
-    const updatedChat = await Chat.findByIdAndUpdate(
-      chatId,
-      {
-        $addToSet: {
-          users: { $each: userObjectIds },
-        },
-      },
-      { new: true }
-    )
-      .populate("users", "username photo email")
-      .populate("groupAdmin", "username photo email");
+    const { data: chat, error: chatError } = await supabase
+      .from("chats")
+      .select(
+        `id, chat_name, chat_members ( user_id, profiles ( id, username, email, photo ) )`
+      )
+      .eq("id", chatId)
+      .single();
 
-    if (!updatedChat) {
-      res.status(404).json({ error: "Chat not found" });
-      return;
-    }
-
-    // Add this chat to each user's chats array
-    for (const user of users) {
-      if (!user.chats.includes(chatId)) {
-        user.chats.push(chatId);
-        await user.save();
-      }
-    }
-
-    res.status(200).json({ chat: updatedChat });
+    if (chatError) throw chatError;
+    res.status(200).json({ chat });
   } catch (err: any) {
     console.error(err);
     res.status(500).json({ error: err.message });

@@ -1,93 +1,78 @@
 /// <reference path="../types/index.d.ts" />
 import { Request, Response } from "express";
-import {
-  createUserInDB,
-  getUserByIdFromDB,
-  updateUserInDB,
-  deleteUserFromDB,
-} from "../services/user.service";
-import { User } from "../models/userModel";
-import { UpdateUserParams } from "../types/user";
+import { supabase } from "../lib/supabase";
 
 export const getCurrentUser = async (req: Request, res: Response) => {
   const userId = req.user?.userId;
-  console.log("Authenticated userId:", userId);
-
   if (!userId) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
 
   try {
-    const user = await User.findById(userId).select("_id username email photo");
-    if (!user) {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("id, username, email, photo")
+      .eq("id", userId)
+      .single();
+
+    if (error || !data) {
       res.status(404).json({ error: "User not found in DB" });
       return;
     }
 
-    res.json(user);
+    res.json({ _id: data.id, username: data.username, email: data.email, photo: data.photo });
   } catch (err: any) {
     res.status(500).json({ error: err.message || "Server error" });
   }
 };
 
-export const createUser = async (
-  req: Request,
-  res: Response
-) => {
+export const getUserById = async (req: Request, res: Response) => {
   try {
-    const newUser = await createUserInDB(req.body);
-    res.status(201).json(newUser);
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("id, username, email, photo")
+      .eq("id", req.params.id)
+      .single();
+
+    if (error || !data) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+    res.json({ _id: data.id, username: data.username, email: data.email, photo: data.photo });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
 };
 
-export const getUserById = async (
-  req: Request,
-  res: Response
-) => {
+export const updateUser = async (req: Request, res: Response) => {
   try {
-    const user = await getUserByIdFromDB(req.params.id);
-    if (!user) {
+    const { username, photo } = req.body;
+    const { data, error } = await supabase
+      .from("profiles")
+      .update({ username, photo })
+      .eq("id", req.params.id)
+      .select()
+      .single();
+
+    if (error || !data) {
       res.status(404).json({ error: "User not found" });
       return;
     }
-    res.json(user);
+    res.json(data);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
 };
 
-export const updateUser = async (
-  req: Request,
-  res: Response
-) => {
+export const deleteUser = async (req: Request, res: Response) => {
   try {
-    const updatedUser = await updateUserInDB(
-      req.params.id,
-      req.body as UpdateUserParams
-    );
-    if (!updatedUser) {
-      res.status(404).json({ error: "User not found" });
-      return;
-    }
-    res.json(updatedUser);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-};
+    const { error } = await supabase
+      .from("profiles")
+      .delete()
+      .eq("id", req.params.id);
 
-export const deleteUser = async (
-  req: Request,
-  res: Response
-) => {
-  try {
-    const deletedUser = await deleteUserFromDB(req.params.id);
-    if (!deletedUser) {
-      res.status(404).json({ error: "User not found" });
-      return;
-    }
+    if (error) throw error;
     res.json({ message: "User deleted successfully" });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -96,21 +81,23 @@ export const deleteUser = async (
 
 export const searchUsers = async (req: Request, res: Response) => {
   const { query } = req.query;
-
   const userId = req.user?.userId;
 
   if (!query || typeof query !== "string") {
     res.status(400).json({ error: "Query is required" });
-    return
+    return;
   }
 
   try {
-    const users = await User.find({
-      username: { $regex: new RegExp("^" + query, "i") },
-      _id: { $ne: userId }, // starts with query, case-insensitive
-    }).select("_id username email");
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("id, username, email")
+      .ilike("username", `${query}%`)
+      .neq("id", userId ?? "");
 
-    res.json({ users });  
+    if (error) throw error;
+
+    res.json({ users: data?.map(u => ({ _id: u.id, username: u.username, email: u.email })) });
   } catch (err) {
     res.status(500).json({ error: "Server error" });
   }
