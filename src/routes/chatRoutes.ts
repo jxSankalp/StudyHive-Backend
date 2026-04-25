@@ -3,6 +3,7 @@ import {
   addToGroup,
   createGroupChat,
   getAllChats,
+  getChatStats,
   removeFromGroup,
   renameGroup,
 } from "../controllers/chatController";
@@ -14,6 +15,7 @@ const router = express.Router();
 router.use(authMiddleware);
 
 router.get("/", getAllChats);
+router.get("/:chatId/stats", getChatStats);
 router.post("/", createGroupChat);
 router.route("/rename").put(renameGroup);
 router.route("/groupremove").put(removeFromGroup);

@@ -2,6 +2,20 @@
 import { Request, Response } from "express";
 import { supabase } from "../lib/supabase";
 
+const mapNote = (note: any) => ({
+  _id: note.id,
+  name: note.name,
+  content: note.content,
+  chat: note.chat_id,
+  createdAt: note.created_at,
+  updatedAt: note.updated_at,
+  createdBy: note.created_by ? {
+    _id: note.created_by.id,
+    username: note.created_by.username,
+    email: note.created_by.email
+  } : null
+});
+
 export const allNotes = async (req: Request, res: Response): Promise<void> => {
   try {
     const chatId = req.params.chatId || (req.query.chatId as string);
@@ -13,14 +27,14 @@ export const allNotes = async (req: Request, res: Response): Promise<void> => {
     const { data, error } = await supabase
       .from("notes")
       .select(
-        `id, name, chat_id, created_at, updated_at,
+        `id, name, content, chat_id, created_at, updated_at,
          created_by:profiles!notes_created_by_id_fkey ( id, username, email )`
       )
       .eq("chat_id", chatId)
       .order("created_at", { ascending: false });
 
     if (error) throw error;
-    res.json({ data });
+    res.json({ data: data.map(mapNote) });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -47,13 +61,13 @@ export const createNote = async (
       .from("notes")
       .insert({ name, content, chat_id: chatId, created_by_id: userId })
       .select(
-        `id, name, content, chat_id, created_at,
+        `id, name, content, chat_id, created_at, updated_at,
          created_by:profiles!notes_created_by_id_fkey ( id, username, email )`
       )
       .single();
 
     if (error) throw error;
-    res.json(data);
+    res.json({ data: mapNote(data) });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -67,7 +81,7 @@ export const getNoteById = async (
     const { data, error } = await supabase
       .from("notes")
       .select(
-        `id, name, content, chat_id, created_at,
+        `id, name, content, chat_id, created_at, updated_at,
          created_by:profiles!notes_created_by_id_fkey ( id, username, email )`
       )
       .eq("id", req.params.notesId)
@@ -77,7 +91,7 @@ export const getNoteById = async (
       res.status(404).json({ error: "Note not found" });
       return;
     }
-    res.json({ data });
+    res.json({ data: mapNote(data) });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

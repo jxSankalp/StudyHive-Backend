@@ -5,12 +5,14 @@ import {
   deleteUser,
   searchUsers,
   getCurrentUser,
+  getUserStats,
 } from "../controllers/userController";
 import { authMiddleware } from "../middleware/authMiddleware";
 
 const router = express.Router();
 
 router.get("/me", authMiddleware, getCurrentUser);
+router.get("/me/stats", authMiddleware, getUserStats);
 router.get("/search", authMiddleware, searchUsers);
 router.get("/:id", authMiddleware, getUserById);
 router.put("/:id", authMiddleware, updateUser);

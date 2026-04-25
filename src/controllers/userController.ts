@@ -102,3 +102,46 @@ export const searchUsers = async (req: Request, res: Response) => {
     res.status(500).json({ error: "Server error" });
   }
 };
+
+export const getUserStats = async (req: Request, res: Response) => {
+  const userId = req.user?.userId;
+  if (!userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  try {
+    // Get active groups count
+    const { count: groupsCount } = await supabase
+      .from("chat_members")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", userId);
+
+    // Get notes created count
+    const { count: notesCount } = await supabase
+      .from("notes")
+      .select("*", { count: "exact", head: true })
+      .eq("created_by", userId);
+
+    // Get whiteboards created count
+    const { count: whiteboardsCount } = await supabase
+      .from("whiteboards")
+      .select("*", { count: "exact", head: true })
+      .eq("created_by", userId);
+
+    // Get messages sent count
+    const { count: messagesCount } = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("sender_id", userId);
+
+    res.json({
+      activeGroups: groupsCount || 0,
+      notesCreated: notesCount || 0,
+      whiteboardsCreated: whiteboardsCount || 0,
+      messagesSent: messagesCount || 0,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || "Server error" });
+  }
+};

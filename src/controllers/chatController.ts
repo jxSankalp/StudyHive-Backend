@@ -1,6 +1,7 @@
 /// <reference path="../types/index.d.ts" />
 import { Request, Response } from "express";
 import { supabase } from "../lib/supabase";
+import { getOnlineUserCountByIds } from "../socket";
 
 export const getAllChats = async (
   req: Request,
@@ -156,6 +157,61 @@ export const addToGroup = async (req: Request, res: Response) => {
 
     if (chatError) throw chatError;
     res.status(200).json({ chat });
+  } catch (err: any) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+export const getChatStats = async (req: Request, res: Response) => {
+  try {
+    const userId = req.user?.userId;
+    const { chatId } = req.params;
+
+    if (!userId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    if (!chatId) {
+      res.status(400).json({ error: "chatId is required" });
+      return;
+    }
+
+    const { data: membership, error: membershipError } = await supabase
+      .from("chat_members")
+      .select("chat_id")
+      .eq("chat_id", chatId)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (membershipError) throw membershipError;
+    if (!membership) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    const { data: chat, error: chatError } = await supabase
+      .from("chats")
+      .select("id, chat_name, chat_members ( user_id )")
+      .eq("id", chatId)
+      .single();
+
+    if (chatError) throw chatError;
+
+    const memberIds = (chat.chat_members as Array<{ user_id: string }> | null)
+      ?.map((m) => m.user_id)
+      .filter(Boolean) ?? [];
+
+    const totalMembers = memberIds.length;
+    const totalOnline = getOnlineUserCountByIds(memberIds);
+
+    res.status(200).json({
+      chatId: chat.id,
+      chatName: chat.chat_name,
+      totalMembers,
+      totalOnline,
+    });
   } catch (err: any) {
     console.error(err);
     res.status(500).json({ error: err.message });
