@@ -3,6 +3,11 @@ import { Request, Response } from "express";
 import { supabase } from "../lib/supabase";
 import { streamClient } from "../lib/StreamClient";
 
+interface ChatMemberWithProfile {
+  user_id: string;
+  profiles: { id: string; username: string; photo: string | null } | null;
+}
+
 // ─────────────────────────────────────────────────────────────
 // Helper: deduplicate an array by a key
 // ─────────────────────────────────────────────────────────────
@@ -33,6 +38,11 @@ export const createVideoCall = async (
 
   if (!chatId) {
     res.status(400).json({ error: "chatId is required" });
+    return;
+  }
+
+  if (typeof meetName === "string" && meetName.trim().length > 100) {
+    res.status(400).json({ error: "Meeting name must be 100 characters or fewer" });
     return;
   }
 
@@ -79,8 +89,9 @@ export const createVideoCall = async (
 
     // 4. Build unique stream users — deduplicate by user id to prevent
     //    duplicate participants in both Stream and meeting_participants
-    const rawMembers = (chat.chat_members as any[]).filter(
-      (m) => m.profiles != null
+    const rawMembers = (chat.chat_members as unknown as ChatMemberWithProfile[]).filter(
+      (member): member is ChatMemberWithProfile & { profiles: NonNullable<ChatMemberWithProfile["profiles"]> } =>
+        member.profiles != null
     );
     const uniqueMembers = dedupeBy(rawMembers, "user_id");
 
@@ -125,7 +136,12 @@ export const createVideoCall = async (
       .select()
       .single();
 
-    if (meetErr) throw meetErr;
+    if (meetErr) {
+      await call.delete().catch((cleanupError) =>
+        console.error("[createVideoCall] Stream cleanup failed:", cleanupError)
+      );
+      throw meetErr;
+    }
 
     // 8. Insert participants — use upsert with onConflict ignore to be safe
     const participantRows = uniqueMembers.map((m) => ({
@@ -139,7 +155,11 @@ export const createVideoCall = async (
 
     if (partErr) {
       console.error("[createVideoCall] participant insert error:", partErr);
-      // Non-fatal — meeting is created; log and continue
+      await supabase.from("meetings").delete().eq("id", meeting.id);
+      await call.delete().catch((cleanupError) =>
+        console.error("[createVideoCall] Stream cleanup failed:", cleanupError)
+      );
+      throw partErr;
     }
 
     res.status(200).json({
@@ -153,11 +173,9 @@ export const createVideoCall = async (
         minute: "2-digit",
       }),
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("[createVideoCall] error:", err);
-    res
-      .status(500)
-      .json({ error: "Call creation failed", details: err?.message ?? err });
+    res.status(500).json({ error: "Call creation failed" });
   }
 };
 
@@ -171,13 +189,58 @@ export const generateUserToken = async (
   res: Response
 ): Promise<void> => {
   const authenticatedUserId = req.user?.userId;
+  const callId = typeof req.body.callId === "string" ? req.body.callId : "";
 
   if (!authenticatedUserId) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
 
+  if (!callId) {
+    res.status(400).json({ error: "callId is required" });
+    return;
+  }
+
   try {
+    const { data: meeting, error: meetingError } = await supabase
+      .from("meetings")
+      .select("id, status, chat_id, created_by_id")
+      .eq("call_id", callId)
+      .maybeSingle();
+
+    if (meetingError) throw meetingError;
+    if (!meeting) {
+      res.status(404).json({ error: "Meeting not found" });
+      return;
+    }
+    if (meeting.status === "ended") {
+      res.status(410).json({ error: "This meeting has ended" });
+      return;
+    }
+    const { data: currentMembership, error: membershipError } = await supabase
+      .from("chat_members")
+      .select("user_id")
+      .eq("chat_id", meeting.chat_id)
+      .eq("user_id", authenticatedUserId)
+      .maybeSingle();
+    if (membershipError) throw membershipError;
+    if (!currentMembership) {
+      res.status(403).json({ error: "You are no longer a member of this workspace" });
+      return;
+    }
+
+    const { data: participant, error: participantError } = await supabase
+      .from("meeting_participants")
+      .select("user_id")
+      .eq("meeting_id", meeting.id)
+      .eq("user_id", authenticatedUserId)
+      .maybeSingle();
+    if (participantError) throw participantError;
+    if (!participant) {
+      res.status(403).json({ error: "You are not a participant in this meeting" });
+      return;
+    }
+
     // Ensure the user exists in Stream (upsert idempotent)
     const { data: profile } = await supabase
       .from("profiles")
@@ -201,12 +264,14 @@ export const generateUserToken = async (
       validity_in_seconds: 3600,
     });
 
-    res.status(200).json({ token });
-  } catch (err: any) {
+    res.status(200).json({
+      token,
+      meetingDbId: meeting.id,
+      canManage: meeting.created_by_id === authenticatedUserId,
+    });
+  } catch (err: unknown) {
     console.error("[generateUserToken] error:", err);
-    res
-      .status(500)
-      .json({ error: "Token generation failed", details: err?.message ?? err });
+    res.status(500).json({ error: "Token generation failed" });
   }
 };
 
@@ -219,6 +284,11 @@ export const getMeetingsForChat = async (
 ): Promise<void> => {
   const { chatId } = req.params;
   const userId = req.user?.userId;
+
+  if (!userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
 
   if (!chatId) {
     res.status(400).json({ error: "chatId is required" });
@@ -243,7 +313,7 @@ export const getMeetingsForChat = async (
     // duplicates that can arise from nested PostgREST joins
     const { data: meetings, error } = await supabase
       .from("meetings")
-      .select("id, call_id, name, status, duration, scheduled_at")
+      .select("id, call_id, name, status, duration, scheduled_at, created_by_id")
       .eq("chat_id", chatId)
       .order("scheduled_at", { ascending: false });
 
@@ -284,14 +354,13 @@ export const getMeetingsForChat = async (
         hour: "2-digit",
         minute: "2-digit",
       }),
+      canManage: m.created_by_id === userId,
     }));
 
     res.status(200).json(formatted);
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("[getMeetingsForChat] error:", err);
-    res
-      .status(500)
-      .json({ error: "Failed to fetch meetings", details: err?.message ?? err });
+    res.status(500).json({ error: "Failed to fetch meetings" });
   }
 };
 
@@ -304,12 +373,16 @@ export const updateMeetingStatus = async (
   res: Response
 ): Promise<void> => {
   const { meetingId } = req.params;
-  const { status } = req.body as { status: "active" | "ended" | "scheduled" };
+  const status: unknown = req.body.status;
   const userId = req.user?.userId;
 
   const VALID_STATUSES = ["active", "scheduled", "ended"] as const;
-  if (!VALID_STATUSES.includes(status)) {
+  if (typeof status !== "string" || !VALID_STATUSES.includes(status as (typeof VALID_STATUSES)[number])) {
     res.status(400).json({ error: `Invalid status. Must be one of: ${VALID_STATUSES.join(", ")}` });
+    return;
+  }
+  if (!userId) {
+    res.status(401).json({ error: "Unauthorized" });
     return;
   }
 
@@ -317,7 +390,7 @@ export const updateMeetingStatus = async (
     // Only the creator can update the status
     const { data: meeting, error: fetchErr } = await supabase
       .from("meetings")
-      .select("id, created_by_id, call_id")
+      .select("id, created_by_id, call_id, status")
       .eq("id", meetingId)
       .single();
 
@@ -331,6 +404,19 @@ export const updateMeetingStatus = async (
       return;
     }
 
+    // Updating our database alone leaves the active Stream session running.
+    // End it through Stream first so every connected participant receives the
+    // call.ended event and is removed from the room.
+    if (status === "ended") {
+      try {
+        await streamClient.video.call("default", meeting.call_id).end();
+      } catch (streamError) {
+        console.error("[updateMeetingStatus] Stream end failed:", streamError);
+        res.status(502).json({ error: "The video provider could not end the meeting. Please retry." });
+        return;
+      }
+    }
+
     const { error: updateErr } = await supabase
       .from("meetings")
       .update({ status, updated_at: new Date().toISOString() })
@@ -339,8 +425,8 @@ export const updateMeetingStatus = async (
     if (updateErr) throw updateErr;
 
     res.status(200).json({ success: true, meetingId, status });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("[updateMeetingStatus] error:", err);
-    res.status(500).json({ error: "Failed to update meeting status", details: err?.message ?? err });
+    res.status(500).json({ error: "Failed to update meeting status" });
   }
 };

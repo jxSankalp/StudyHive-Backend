@@ -21,13 +21,22 @@ const cors_1 = __importDefault(require("cors"));
 const cookie_parser_1 = __importDefault(require("cookie-parser"));
 const app = (0, express_1.default)();
 const server = (0, http_1.createServer)(app);
+const configuredOrigins = new Set([process.env.CLIENT_URL, ...(process.env.CLIENT_URLS ?? "").split(",")]
+    .map((origin) => origin?.trim().replace(/\/$/, ""))
+    .filter((origin) => Boolean(origin)));
+const isAllowedOrigin = (origin) => {
+    if (!origin)
+        return true;
+    const normalized = origin.replace(/\/$/, "");
+    if (configuredOrigins.has(normalized))
+        return true;
+    return process.env.NODE_ENV !== "production" &&
+        /^http:\/\/(localhost|127\.0\.0\.1|\[::1\]):\d+$/.test(normalized);
+};
 // CORS: allow any localhost port in development (handles Vite port changes)
 app.use((0, cors_1.default)({
     origin: (origin, callback) => {
-        // Allow same-machine requests (localhost on any port) and configured CLIENT_URL
-        if (!origin ||
-            origin.startsWith("http://localhost:") ||
-            origin === process.env.CLIENT_URL) {
+        if (isAllowedOrigin(origin)) {
             callback(null, true);
         }
         else {
@@ -36,7 +45,7 @@ app.use((0, cors_1.default)({
     },
     credentials: true,
 }));
-app.use(express_1.default.json());
+app.use(express_1.default.json({ limit: "2mb" }));
 app.use((0, cookie_parser_1.default)());
 // Routes
 app.use("/api/auth", authRoutes_1.default);
@@ -50,8 +59,42 @@ app.use("/api/whiteboards", whiteboardRoutes_1.default);
 app.get("/health", (_req, res) => {
     res.json({ ok: true });
 });
+app.use((_req, res) => {
+    res.status(404).json({ error: "Route not found" });
+});
+app.use((error, _req, res, _next) => {
+    console.error("[Server] Unhandled request error:", error);
+    const candidateStatus = error.status;
+    const status = error.message.startsWith("CORS:")
+        ? 403
+        : typeof candidateStatus === "number" && candidateStatus >= 400 && candidateStatus < 500
+            ? candidateStatus
+            : 500;
+    const message = status === 400
+        ? "Invalid request body"
+        : status === 413
+            ? "Request body is too large"
+            : status === 403
+                ? "Origin not allowed"
+                : "Internal server error";
+    res.status(status).json({ error: message });
+});
 // Start server
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`[Server] Running on port ${PORT} — Supabase backend`));
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = "0.0.0.0";
+server.listen(PORT, HOST, () => console.log(`[Server] Running on port ${PORT} — Supabase backend`));
 // Initialize socket
 (0, socket_1.initSocket)(server);
+const shutdown = (signal) => {
+    console.log(`[Server] ${signal} received; closing connections`);
+    server.close((error) => {
+        if (error) {
+            console.error("[Server] Graceful shutdown failed:", error);
+            process.exit(1);
+        }
+        process.exit(0);
+    });
+    setTimeout(() => process.exit(1), 10000).unref();
+};
+process.once("SIGTERM", () => shutdown("SIGTERM"));
+process.once("SIGINT", () => shutdown("SIGINT"));

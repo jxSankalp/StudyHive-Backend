@@ -7,9 +7,10 @@ const express_1 = __importDefault(require("express"));
 const videoController_1 = require("../controllers/videoController");
 const authMiddleware_1 = require("../middleware/authMiddleware");
 const router = express_1.default.Router();
-// Protect all routes
+// All routes require authentication
 router.use(authMiddleware_1.authMiddleware);
-router.post("/create-call", videoController_1.createVideoCall); // /api/meet/create-call
-router.post("/get-token", videoController_1.generateUserToken); // /api/meet/get-token
-router.get("/:chatId", videoController_1.getMeetingsForChat);
+router.post("/create-call", videoController_1.createVideoCall); // POST /api/meet/create-call
+router.post("/get-token", videoController_1.generateUserToken); // POST /api/meet/get-token
+router.get("/:chatId", videoController_1.getMeetingsForChat); // GET  /api/meet/:chatId
+router.patch("/:meetingId/status", videoController_1.updateMeetingStatus); // PATCH /api/meet/:meetingId/status
 exports.default = router;

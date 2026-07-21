@@ -21,6 +21,11 @@ const getMe = async (req, res) => {
             .select("id, email, username, photo")
             .eq("id", userId)
             .maybeSingle(); // maybeSingle() returns null instead of error when row not found
+        if (error) {
+            console.error("Profile lookup error:", error);
+            res.status(500).json({ message: "Failed to load profile" });
+            return;
+        }
         // 2. If not found, auto-create from Supabase Auth user
         if (!profile) {
             const { data: authData, error: authErr } = await supabase_1.supabase.auth.admin.getUserById(userId);
@@ -37,13 +42,7 @@ const getMe = async (req, res) => {
                 .single();
             if (createErr) {
                 console.error("Auto-create profile error:", createErr);
-                // Return a synthetic profile so the client still works even if DB isn't set up
-                res.status(200).json({
-                    _id: userId,
-                    email,
-                    username,
-                    photo: null,
-                });
+                res.status(500).json({ message: "Failed to create user profile" });
                 return;
             }
             profile = created;
@@ -72,9 +71,15 @@ const upsertProfile = async (req, res) => {
             res.status(401).json({ message: "Unauthorized" });
             return;
         }
-        const { username, email } = req.body;
-        if (!username || !email) {
-            res.status(400).json({ message: "username and email are required" });
+        const username = typeof req.body.username === "string" ? req.body.username.trim() : "";
+        if (username.length < 2 || username.length > 50) {
+            res.status(400).json({ message: "username must be between 2 and 50 characters" });
+            return;
+        }
+        const { data: authData, error: authError } = await supabase_1.supabase.auth.admin.getUserById(userId);
+        const email = authData.user?.email;
+        if (authError || !email) {
+            res.status(404).json({ message: "User not found in auth" });
             return;
         }
         const { data, error } = await supabase_1.supabase
@@ -84,8 +89,7 @@ const upsertProfile = async (req, res) => {
             .single();
         if (error) {
             console.error("upsertProfile error:", error);
-            // Return success anyway so sign-up flow isn't broken if table doesn't exist yet
-            res.status(200).json({ _id: userId, email, username, photo: null });
+            res.status(500).json({ message: "Failed to save profile" });
             return;
         }
         res.status(200).json({

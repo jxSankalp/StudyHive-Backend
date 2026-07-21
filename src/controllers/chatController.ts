@@ -1,219 +1,294 @@
 /// <reference path="../types/index.d.ts" />
 import { Request, Response } from "express";
 import { supabase } from "../lib/supabase";
-import { getOnlineUserCountByIds } from "../socket";
+import { isChatAdmin, isChatMember, isNonEmptyString } from "../lib/access";
+import { getOnlineUserCountByIds, revokeChatSocketAccess } from "../socket";
 
-export const getAllChats = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+const normalizeIds = (values: unknown): string[] => {
+  if (!Array.isArray(values)) return [];
+  return Array.from(
+    new Set(values.filter(isNonEmptyString).map((value) => value.trim()))
+  );
+};
+
+export const getAllChats = async (req: Request, res: Response): Promise<void> => {
+  const userId = req.user?.userId;
+  if (!userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
   try {
-    const userId = req.user?.userId;
-    if (!userId) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-
-    // Get all chat_members rows for this user, then fetch the chats
     const { data: memberRows, error: memberError } = await supabase
       .from("chat_members")
       .select("chat_id")
       .eq("user_id", userId);
-
     if (memberError) throw memberError;
 
-    const chatIds = memberRows?.map((r) => r.chat_id) ?? [];
+    const chatIds = memberRows?.map((row) => row.chat_id) ?? [];
     if (chatIds.length === 0) {
-      res.status(200).json({ chats: [] });
+      res.json({ chats: [] });
       return;
     }
 
-    const { data: chats, error: chatsError } = await supabase
+    const { data: chats, error } = await supabase
       .from("chats")
-      .select(
-        `
+      .select(`
         id, chat_name, description, group_admin_id, latest_message_id, created_at, updated_at,
         chat_members ( user_id, profiles ( id, username, email, photo ) ),
         messages!chats_latest_message_id_fkey ( id, content, created_at )
-      `
-      )
+      `)
       .in("id", chatIds)
       .order("updated_at", { ascending: false });
+    if (error) throw error;
 
-    if (chatsError) throw chatsError;
-
-    res.status(200).json({ chats });
-  } catch (err: any) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    res.json({ chats: chats ?? [] });
+  } catch (error) {
+    console.error("[getAllChats]", error);
+    res.status(500).json({ error: "Failed to load workspaces" });
   }
 };
 
-export const createGroupChat = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+export const createGroupChat = async (req: Request, res: Response): Promise<void> => {
+  const adminId = req.user?.userId;
+  if (!adminId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+  const description =
+    typeof req.body.description === "string" ? req.body.description.trim() : null;
+  const requestedIds = normalizeIds(req.body.users).filter((id) => id !== adminId);
+
+  if (!name || name.length > 100) {
+    res.status(400).json({ error: "Workspace name must be between 1 and 100 characters" });
+    return;
+  }
+  if (description && description.length > 500) {
+    res.status(400).json({ error: "Description must be 500 characters or fewer" });
+    return;
+  }
+  if (requestedIds.length === 0) {
+    res.status(400).json({ error: "Select at least one other member" });
+    return;
+  }
+
+  let createdChatId: string | null = null;
   try {
-    const adminId = req.user?.userId;
-    if (!adminId) {
-      res.status(401).json({ error: "Unauthorized" });
+    const { data: profiles, error: profileError } = await supabase
+      .from("profiles")
+      .select("id")
+      .in("id", requestedIds);
+    if (profileError) throw profileError;
+
+    const validIds = new Set((profiles ?? []).map((profile) => profile.id));
+    if (requestedIds.some((id) => !validIds.has(id))) {
+      res.status(400).json({ error: "One or more selected users do not exist" });
       return;
     }
 
-    const { name, description, users } = req.body; // users = array of user UUIDs
-    if (!name || !Array.isArray(users) || users.length === 0) {
-      res.status(400).json({ error: "All fields are required" });
-      return;
-    }
-
-    // Create the chat row
     const { data: chat, error: chatError } = await supabase
       .from("chats")
       .insert({ chat_name: name, description, group_admin_id: adminId })
       .select()
       .single();
-
     if (chatError) throw chatError;
+    createdChatId = chat.id;
 
-    // Add all members including the admin
-    const allUserIds = Array.from(new Set([...users, adminId]));
-    const memberRows = allUserIds.map((uid) => ({
+    const memberRows = [...requestedIds, adminId].map((userId) => ({
       chat_id: chat.id,
-      user_id: uid,
+      user_id: userId,
     }));
-
-    const { error: memberError } = await supabase
-      .from("chat_members")
-      .insert(memberRows);
-
+    const { error: memberError } = await supabase.from("chat_members").insert(memberRows);
     if (memberError) throw memberError;
 
     res.status(201).json({ group: chat });
-  } catch (err: any) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    if (createdChatId) {
+      await supabase.from("chats").delete().eq("id", createdChatId);
+    }
+    console.error("[createGroupChat]", error);
+    res.status(500).json({ error: "Failed to create workspace" });
   }
 };
 
-export const renameGroup = async (req: Request, res: Response) => {
-  const { chatId, chatName } = req.body;
-  try {
-    const { data, error } = await supabase
-      .from("chats")
-      .update({ chat_name: chatName })
-      .eq("id", chatId)
-      .select()
-      .single();
-
-    if (error) throw error;
-    res.json(data);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+export const renameGroup = async (req: Request, res: Response): Promise<void> => {
+  const userId = req.user?.userId;
+  const chatId = typeof req.body.chatId === "string" ? req.body.chatId : "";
+  const chatName = typeof req.body.chatName === "string" ? req.body.chatName.trim() : "";
+  if (!userId || !chatId) {
+    res.status(userId ? 400 : 401).json({ error: userId ? "chatId is required" : "Unauthorized" });
+    return;
   }
-};
-
-export const removeFromGroup = async (req: Request, res: Response) => {
-  const { chatId, userId } = req.body;
-  try {
-    const { error } = await supabase
-      .from("chat_members")
-      .delete()
-      .eq("chat_id", chatId)
-      .eq("user_id", userId);
-
-    if (error) throw error;
-    res.json({ message: "User removed" });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-export const addToGroup = async (req: Request, res: Response) => {
-  const { chatId, userIds } = req.body;
-  if (!Array.isArray(userIds) || userIds.length === 0) {
-    res.status(400).json({ error: "No users provided" });
+  if (!chatName || chatName.length > 100) {
+    res.status(400).json({ error: "Workspace name must be between 1 and 100 characters" });
     return;
   }
 
   try {
-    const rows = userIds.map((uid: string) => ({
-      chat_id: chatId,
-      user_id: uid,
-    }));
+    if (!(await isChatAdmin(chatId, userId))) {
+      res.status(403).json({ error: "Only the workspace admin can rename it" });
+      return;
+    }
+    const { data, error } = await supabase
+      .from("chats")
+      .update({ chat_name: chatName, updated_at: new Date().toISOString() })
+      .eq("id", chatId)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    console.error("[renameGroup]", error);
+    res.status(500).json({ error: "Failed to rename workspace" });
+  }
+};
 
+export const removeFromGroup = async (req: Request, res: Response): Promise<void> => {
+  const actorId = req.user?.userId;
+  const chatId = typeof req.body.chatId === "string" ? req.body.chatId : "";
+  const targetId = typeof req.body.userId === "string" ? req.body.userId : "";
+  if (!actorId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  if (!chatId || !targetId) {
+    res.status(400).json({ error: "chatId and userId are required" });
+    return;
+  }
+
+  let membershipRemoved = false;
+  try {
+    if (!(await isChatAdmin(chatId, actorId))) {
+      res.status(403).json({ error: "Only the workspace admin can remove members" });
+      return;
+    }
+    if (targetId === actorId) {
+      res.status(400).json({ error: "The workspace admin cannot remove themselves" });
+      return;
+    }
     const { error } = await supabase
       .from("chat_members")
-      .upsert(rows, { onConflict: "chat_id,user_id" });
+      .delete()
+      .eq("chat_id", chatId)
+      .eq("user_id", targetId);
+    if (error) throw error;
+    membershipRemoved = true;
+    const { data: meetings, error: meetingsError } = await supabase
+      .from("meetings")
+      .select("id")
+      .eq("chat_id", chatId);
+    if (meetingsError) throw meetingsError;
+    const meetingIds = (meetings ?? []).map((meeting) => meeting.id);
+    if (meetingIds.length > 0) {
+      const { error: participantError } = await supabase
+        .from("meeting_participants")
+        .delete()
+        .eq("user_id", targetId)
+        .in("meeting_id", meetingIds);
+      if (participantError) throw participantError;
+    }
+    membershipRemoved = false;
+    await revokeChatSocketAccess(targetId, chatId).catch((socketError) =>
+      console.error("[removeFromGroup] realtime revocation failed", socketError)
+    );
+    res.json({ message: "User removed" });
+  } catch (error) {
+    if (membershipRemoved) {
+      const { error: restoreError } = await supabase
+        .from("chat_members")
+        .upsert({ chat_id: chatId, user_id: targetId }, { onConflict: "chat_id,user_id" });
+      if (restoreError) console.error("[removeFromGroup] rollback failed", restoreError);
+    }
+    console.error("[removeFromGroup]", error);
+    res.status(500).json({ error: "Failed to remove member" });
+  }
+};
 
+export const addToGroup = async (req: Request, res: Response): Promise<void> => {
+  const actorId = req.user?.userId;
+  const chatId = typeof req.body.chatId === "string" ? req.body.chatId : "";
+  const userIds = normalizeIds(req.body.userIds);
+  if (!actorId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  if (!chatId || userIds.length === 0) {
+    res.status(400).json({ error: "chatId and at least one user are required" });
+    return;
+  }
+
+  try {
+    if (!(await isChatAdmin(chatId, actorId))) {
+      res.status(403).json({ error: "Only the workspace admin can add members" });
+      return;
+    }
+    const { data: profiles, error: profileError } = await supabase
+      .from("profiles")
+      .select("id")
+      .in("id", userIds);
+    if (profileError) throw profileError;
+    if ((profiles ?? []).length !== userIds.length) {
+      res.status(400).json({ error: "One or more selected users do not exist" });
+      return;
+    }
+
+    const rows = userIds.map((userId) => ({ chat_id: chatId, user_id: userId }));
+    const { error } = await supabase
+      .from("chat_members")
+      .upsert(rows, { onConflict: "chat_id,user_id", ignoreDuplicates: true });
     if (error) throw error;
 
     const { data: chat, error: chatError } = await supabase
       .from("chats")
-      .select(
-        `id, chat_name, chat_members ( user_id, profiles ( id, username, email, photo ) )`
-      )
+      .select("id, chat_name, chat_members ( user_id, profiles ( id, username, email, photo ) )")
       .eq("id", chatId)
       .single();
-
     if (chatError) throw chatError;
-    res.status(200).json({ chat });
-  } catch (err: any) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    res.json({ chat });
+  } catch (error) {
+    console.error("[addToGroup]", error);
+    res.status(500).json({ error: "Failed to add members" });
   }
 };
 
-export const getChatStats = async (req: Request, res: Response) => {
+export const getChatStats = async (req: Request, res: Response): Promise<void> => {
+  const userId = req.user?.userId;
+  const { chatId } = req.params;
+  if (!userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  if (!chatId) {
+    res.status(400).json({ error: "chatId is required" });
+    return;
+  }
+
   try {
-    const userId = req.user?.userId;
-    const { chatId } = req.params;
-
-    if (!userId) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-
-    if (!chatId) {
-      res.status(400).json({ error: "chatId is required" });
-      return;
-    }
-
-    const { data: membership, error: membershipError } = await supabase
-      .from("chat_members")
-      .select("chat_id")
-      .eq("chat_id", chatId)
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    if (membershipError) throw membershipError;
-    if (!membership) {
+    if (!(await isChatMember(chatId, userId))) {
       res.status(403).json({ error: "Forbidden" });
       return;
     }
-
-    const { data: chat, error: chatError } = await supabase
+    const { data: chat, error } = await supabase
       .from("chats")
-      .select("id, chat_name, chat_members ( user_id )")
+      .select("id, chat_name, group_admin_id, chat_members ( user_id )")
       .eq("id", chatId)
       .single();
-
-    if (chatError) throw chatError;
+    if (error) throw error;
 
     const memberIds = (chat.chat_members as Array<{ user_id: string }> | null)
-      ?.map((m) => m.user_id)
+      ?.map((member) => member.user_id)
       .filter(Boolean) ?? [];
-
-    const totalMembers = memberIds.length;
-    const totalOnline = getOnlineUserCountByIds(memberIds);
-
-    res.status(200).json({
+    res.json({
       chatId: chat.id,
       chatName: chat.chat_name,
-      totalMembers,
-      totalOnline,
+      totalMembers: memberIds.length,
+      totalOnline: getOnlineUserCountByIds(memberIds),
+      canManage: chat.group_admin_id === userId,
     });
-  } catch (err: any) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    console.error("[getChatStats]", error);
+    res.status(500).json({ error: "Failed to load workspace statistics" });
   }
 };

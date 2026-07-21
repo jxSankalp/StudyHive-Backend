@@ -1,172 +1,215 @@
 /// <reference path="../types/index.d.ts" />
 import { Request, Response } from "express";
+import { getNoteChatId, isChatMember } from "../lib/access";
 import { supabase } from "../lib/supabase";
 
-const mapNote = (note: any) => ({
+interface NoteRow {
+  id: string;
+  name: string;
+  content: string | null;
+  chat_id: string;
+  created_at: string;
+  updated_at: string;
+  created_by: { id: string; username: string; email: string } | null;
+}
+
+const NOTE_SELECT = `id, name, content, chat_id, created_at, updated_at,
+  created_by:profiles!notes_created_by_id_fkey ( id, username, email )`;
+
+const mapNote = (note: NoteRow) => ({
   _id: note.id,
   name: note.name,
-  content: note.content,
+  content: note.content ?? "",
   chat: note.chat_id,
   createdAt: note.created_at,
   updatedAt: note.updated_at,
-  createdBy: note.created_by ? {
-    _id: note.created_by.id,
-    username: note.created_by.username,
-    email: note.created_by.email
-  } : null
+  createdBy: note.created_by
+    ? { _id: note.created_by.id, username: note.created_by.username, email: note.created_by.email }
+    : null,
 });
 
-export const allNotes = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const chatId = req.params.chatId || (req.query.chatId as string);
-    if (!chatId) {
-      res.status(400).json({ error: "Chat ID is required" });
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from("notes")
-      .select(
-        `id, name, content, chat_id, created_at, updated_at,
-         created_by:profiles!notes_created_by_id_fkey ( id, username, email )`
-      )
-      .eq("chat_id", chatId)
-      .order("created_at", { ascending: false });
-
-    if (error) throw error;
-    res.json({ data: data.map(mapNote) });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
-  }
+const requireNoteAccess = async (noteId: string, userId: string) => {
+  const chatId = await getNoteChatId(noteId);
+  return chatId ? { chatId, allowed: await isChatMember(chatId, userId) } : null;
 };
 
-export const createNote = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+export const allNotes = async (req: Request, res: Response): Promise<void> => {
   const userId = req.user?.userId;
+  const chatId = typeof req.query.chatId === "string" ? req.query.chatId : "";
   if (!userId) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
-
-  const { content, name, chatId } = req.body;
-  if (!content || !chatId || !name) {
-    res.status(400).json({ error: "content, name and chatId are required" });
+  if (!chatId) {
+    res.status(400).json({ error: "Chat ID is required" });
     return;
   }
 
   try {
+    if (!(await isChatMember(chatId, userId))) {
+      res.status(403).json({ error: "You are not a member of this workspace" });
+      return;
+    }
+    const { data, error } = await supabase
+      .from("notes")
+      .select(NOTE_SELECT)
+      .eq("chat_id", chatId)
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    res.json({ data: (data as unknown as NoteRow[]).map(mapNote) });
+  } catch (error) {
+    console.error("[allNotes]", error);
+    res.status(500).json({ error: "Failed to load notes" });
+  }
+};
+
+export const createNote = async (req: Request, res: Response): Promise<void> => {
+  const userId = req.user?.userId;
+  const chatId = typeof req.body.chatId === "string" ? req.body.chatId : "";
+  const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+  const content = typeof req.body.content === "string" ? req.body.content : "";
+  if (!userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  if (!chatId || !name || name.length > 100 || content.length > 100_000) {
+    res.status(400).json({ error: "A valid chatId, name, and content are required" });
+    return;
+  }
+
+  try {
+    if (!(await isChatMember(chatId, userId))) {
+      res.status(403).json({ error: "You are not a member of this workspace" });
+      return;
+    }
     const { data, error } = await supabase
       .from("notes")
       .insert({ name, content, chat_id: chatId, created_by_id: userId })
-      .select(
-        `id, name, content, chat_id, created_at, updated_at,
-         created_by:profiles!notes_created_by_id_fkey ( id, username, email )`
-      )
+      .select(NOTE_SELECT)
       .single();
-
     if (error) throw error;
-    res.json({ data: mapNote(data) });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    res.status(201).json({ data: mapNote(data as unknown as NoteRow) });
+  } catch (error) {
+    console.error("[createNote]", error);
+    res.status(500).json({ error: "Failed to create note" });
   }
 };
 
-export const getNoteById = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+export const getNoteById = async (req: Request, res: Response): Promise<void> => {
+  const userId = req.user?.userId;
+  if (!userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
   try {
+    const access = await requireNoteAccess(req.params.notesId, userId);
+    if (!access) {
+      res.status(404).json({ error: "Note not found" });
+      return;
+    }
+    if (!access.allowed) {
+      res.status(403).json({ error: "Access denied" });
+      return;
+    }
     const { data, error } = await supabase
       .from("notes")
-      .select(
-        `id, name, content, chat_id, created_at, updated_at,
-         created_by:profiles!notes_created_by_id_fkey ( id, username, email )`
-      )
+      .select(NOTE_SELECT)
       .eq("id", req.params.notesId)
       .single();
-
     if (error || !data) {
       res.status(404).json({ error: "Note not found" });
       return;
     }
-    res.json({ data: mapNote(data) });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.json({ data: mapNote(data as unknown as NoteRow) });
+  } catch (error) {
+    console.error("[getNoteById]", error);
+    res.status(500).json({ error: "Failed to load note" });
   }
 };
 
-export const deleteNote = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+export const deleteNote = async (req: Request, res: Response): Promise<void> => {
   const userId = req.user?.userId;
   if (!userId) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
-
   try {
-    const { data: note, error: findErr } = await supabase
+    const { data: note, error } = await supabase
       .from("notes")
-      .select("id, created_by_id")
+      .select("id, chat_id, created_by_id")
       .eq("id", req.params.notesId)
-      .single();
-
-    if (findErr || !note) {
+      .maybeSingle();
+    if (error) throw error;
+    if (!note) {
       res.status(404).json({ error: "Note not found" });
       return;
     }
-
-    if (note.created_by_id !== userId) {
-      res.status(403).json({ error: "Not allowed to delete this note" });
+    if (!(await isChatMember(note.chat_id, userId))) {
+      res.status(403).json({ error: "Access denied" });
       return;
     }
-
-    const { error: delErr } = await supabase
-      .from("notes")
-      .delete()
-      .eq("id", note.id);
-
-    if (delErr) throw delErr;
+    if (note.created_by_id !== userId) {
+      res.status(403).json({ error: "Only the note creator can delete it" });
+      return;
+    }
+    const { error: deleteError } = await supabase.from("notes").delete().eq("id", note.id);
+    if (deleteError) throw deleteError;
     res.json({ message: "Note deleted successfully" });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    console.error("[deleteNote]", error);
+    res.status(500).json({ error: "Failed to delete note" });
   }
 };
 
-export const updateNote = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+export const updateNote = async (req: Request, res: Response): Promise<void> => {
   const userId = req.user?.userId;
   if (!userId) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
-
-  const { notesId } = req.params;
-  const { content, name } = req.body;
+  const updates: { content?: string; name?: string; updated_at: string } = {
+    updated_at: new Date().toISOString(),
+  };
+  if (req.body.content !== undefined) {
+    if (typeof req.body.content !== "string" || req.body.content.length > 100_000) {
+      res.status(400).json({ error: "Invalid note content" });
+      return;
+    }
+    updates.content = req.body.content;
+  }
+  if (req.body.name !== undefined) {
+    const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+    if (!name || name.length > 100) {
+      res.status(400).json({ error: "Invalid note name" });
+      return;
+    }
+    updates.name = name;
+  }
+  if (updates.content === undefined && updates.name === undefined) {
+    res.status(400).json({ error: "No changes provided" });
+    return;
+  }
 
   try {
-    const updates: Record<string, any> = {};
-    if (content !== undefined) updates.content = content;
-    if (name !== undefined) updates.name = name;
-
+    const access = await requireNoteAccess(req.params.notesId, userId);
+    if (!access) {
+      res.status(404).json({ error: "Note not found" });
+      return;
+    }
+    if (!access.allowed) {
+      res.status(403).json({ error: "Access denied" });
+      return;
+    }
     const { data, error } = await supabase
       .from("notes")
       .update(updates)
-      .eq("id", notesId)
-      .select()
+      .eq("id", req.params.notesId)
+      .select(NOTE_SELECT)
       .single();
-
-    if (error || !data) {
-      res.status(404).json({ error: "Note not found" });
-      return;
-    }
-    res.json({ message: "Note updated successfully", data });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    if (error) throw error;
+    res.json({ message: "Note updated successfully", data: mapNote(data as unknown as NoteRow) });
+  } catch (error) {
+    console.error("[updateNote]", error);
+    res.status(500).json({ error: "Failed to update note" });
   }
 };

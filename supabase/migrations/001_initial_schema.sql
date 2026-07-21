@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS public.profiles (
 
 -- Trigger: auto-insert a profile row whenever a new auth user is created
 CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 BEGIN
   INSERT INTO public.profiles (id, email, username)
   VALUES (
@@ -71,19 +71,28 @@ CREATE TABLE IF NOT EXISTS public.messages (
 );
 
 -- Now safe to add the FK from chats → messages
-ALTER TABLE public.chats
-  ADD CONSTRAINT chats_latest_message_id_fkey
-  FOREIGN KEY (latest_message_id)
-  REFERENCES public.messages (id)
-  ON DELETE SET NULL
-  NOT VALID;           -- NOT VALID skips locking existing rows
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chats_latest_message_id_fkey'
+      AND conrelid = 'public.chats'::regclass
+  ) THEN
+    ALTER TABLE public.chats
+      ADD CONSTRAINT chats_latest_message_id_fkey
+      FOREIGN KEY (latest_message_id)
+      REFERENCES public.messages (id)
+      ON DELETE SET NULL
+      NOT VALID;
+  END IF;
+END $$;
 
 -- ──────────────────────────────────────────────────────────────
 -- 5. MEETINGS
 -- ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.meetings (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  call_id        TEXT NOT NULL,
+  call_id        TEXT UNIQUE NOT NULL,
   name           TEXT DEFAULT 'Untitled Room',
   chat_id        UUID NOT NULL REFERENCES public.chats    (id) ON DELETE CASCADE,
   created_by_id  UUID          REFERENCES public.profiles (id) ON DELETE SET NULL,
@@ -93,6 +102,8 @@ CREATE TABLE IF NOT EXISTS public.meetings (
   created_at     TIMESTAMPTZ DEFAULT NOW(),
   updated_at     TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS meetings_call_id_key ON public.meetings (call_id);
 
 -- ──────────────────────────────────────────────────────────────
 -- 6. MEETING_PARTICIPANTS
@@ -144,13 +155,16 @@ ALTER TABLE public.notes              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whiteboards        ENABLE ROW LEVEL SECURITY;
 
 -- Profiles: anyone authenticated can read, only self can write
+DROP POLICY IF EXISTS "profiles_select" ON public.profiles;
 CREATE POLICY "profiles_select" ON public.profiles
   FOR SELECT USING (auth.role() = 'authenticated');
 
+DROP POLICY IF EXISTS "profiles_update_own" ON public.profiles;
 CREATE POLICY "profiles_update_own" ON public.profiles
   FOR UPDATE USING (auth.uid() = id);
 
 -- Chats / members: members can see their own chats
+DROP POLICY IF EXISTS "chats_member_select" ON public.chats;
 CREATE POLICY "chats_member_select" ON public.chats
   FOR SELECT USING (
     id IN (
@@ -158,10 +172,12 @@ CREATE POLICY "chats_member_select" ON public.chats
     )
   );
 
+DROP POLICY IF EXISTS "chat_members_select" ON public.chat_members;
 CREATE POLICY "chat_members_select" ON public.chat_members
   FOR SELECT USING (user_id = auth.uid());
 
 -- Messages: members of the chat can read
+DROP POLICY IF EXISTS "messages_select" ON public.messages;
 CREATE POLICY "messages_select" ON public.messages
   FOR SELECT USING (
     chat_id IN (
@@ -170,6 +186,7 @@ CREATE POLICY "messages_select" ON public.messages
   );
 
 -- Notes / whiteboards / meetings: same membership check
+DROP POLICY IF EXISTS "notes_select" ON public.notes;
 CREATE POLICY "notes_select" ON public.notes
   FOR SELECT USING (
     chat_id IN (
@@ -177,6 +194,7 @@ CREATE POLICY "notes_select" ON public.notes
     )
   );
 
+DROP POLICY IF EXISTS "whiteboards_select" ON public.whiteboards;
 CREATE POLICY "whiteboards_select" ON public.whiteboards
   FOR SELECT USING (
     chat_id IN (
@@ -184,6 +202,7 @@ CREATE POLICY "whiteboards_select" ON public.whiteboards
     )
   );
 
+DROP POLICY IF EXISTS "meetings_select" ON public.meetings;
 CREATE POLICY "meetings_select" ON public.meetings
   FOR SELECT USING (
     chat_id IN (
@@ -191,6 +210,7 @@ CREATE POLICY "meetings_select" ON public.meetings
     )
   );
 
+DROP POLICY IF EXISTS "meeting_participants_select" ON public.meeting_participants;
 CREATE POLICY "meeting_participants_select" ON public.meeting_participants
   FOR SELECT USING (user_id = auth.uid());
 

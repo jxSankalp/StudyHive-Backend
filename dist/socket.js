@@ -1,110 +1,272 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getIO = exports.initSocket = exports.getOnlineUserCountByIds = void 0;
-// socket.ts
+exports.getIO = exports.initSocket = exports.revokeChatSocketAccess = exports.getOnlineUserCountByIds = void 0;
 const socket_io_1 = require("socket.io");
+const access_1 = require("./lib/access");
 const supabase_1 = require("./lib/supabase");
 let io;
 const onlineUsers = new Map();
 const addOnlineUser = (userId, socketId) => {
-    const userSockets = onlineUsers.get(userId) ?? new Set();
-    userSockets.add(socketId);
-    onlineUsers.set(userId, userSockets);
+    const sockets = onlineUsers.get(userId) ?? new Set();
+    sockets.add(socketId);
+    onlineUsers.set(userId, sockets);
 };
 const removeOnlineUser = (userId, socketId) => {
-    const userSockets = onlineUsers.get(userId);
-    if (!userSockets)
+    const sockets = onlineUsers.get(userId);
+    if (!sockets)
         return;
-    userSockets.delete(socketId);
-    if (userSockets.size === 0) {
+    sockets.delete(socketId);
+    if (sockets.size === 0)
         onlineUsers.delete(userId);
-    }
 };
-const getOnlineUserCountByIds = (userIds) => {
-    const uniqueIds = new Set(userIds);
-    let count = 0;
-    for (const userId of uniqueIds) {
-        if (onlineUsers.has(userId)) {
-            count += 1;
-        }
-    }
-    return count;
-};
+const getOnlineUserCountByIds = (userIds) => Array.from(new Set(userIds)).filter((userId) => onlineUsers.has(userId)).length;
 exports.getOnlineUserCountByIds = getOnlineUserCountByIds;
+const revokeChatSocketAccess = async (userId, chatId) => {
+    if (!io)
+        return;
+    const sockets = await io.in(`user:${userId}`).fetchSockets();
+    for (const socket of sockets) {
+        socket.leave(`chat:${chatId}`);
+        const noteChats = (socket.data.noteChats ?? {});
+        for (const [noteId, resourceChatId] of Object.entries(noteChats)) {
+            if (resourceChatId === chatId) {
+                socket.leave(`note:${noteId}`);
+                delete noteChats[noteId];
+            }
+        }
+        const whiteboardChats = (socket.data.whiteboardChats ?? {});
+        for (const [whiteboardId, resourceChatId] of Object.entries(whiteboardChats)) {
+            if (resourceChatId === chatId) {
+                socket.leave(`whiteboard:${whiteboardId}`);
+                delete whiteboardChats[whiteboardId];
+            }
+        }
+        socket.emit("realtime:access-revoked", { chatId });
+    }
+};
+exports.revokeChatSocketAccess = revokeChatSocketAccess;
+const configuredOrigins = new Set([process.env.CLIENT_URL, ...(process.env.CLIENT_URLS ?? "").split(",")]
+    .map((origin) => origin?.trim().replace(/\/$/, ""))
+    .filter((origin) => Boolean(origin)));
+const isAllowedOrigin = (origin) => {
+    if (!origin)
+        return true;
+    const normalized = origin.replace(/\/$/, "");
+    if (configuredOrigins.has(normalized))
+        return true;
+    return process.env.NODE_ENV !== "production" &&
+        /^http:\/\/(localhost|127\.0\.0\.1|\[::1\]):\d+$/.test(normalized);
+};
+const serializedSize = (value) => {
+    try {
+        return JSON.stringify(value).length;
+    }
+    catch {
+        return Number.POSITIVE_INFINITY;
+    }
+};
 const initSocket = (server) => {
     io = new socket_io_1.Server(server, {
         pingTimeout: 60000,
+        pingInterval: 25000,
+        maxHttpBufferSize: 2000000,
         cors: {
-            origin: process.env.CLIENT_URL,
+            origin: (origin, callback) => isAllowedOrigin(origin)
+                ? callback(null, true)
+                : callback(new Error(`CORS: origin '${origin}' not allowed`)),
+            credentials: true,
         },
     });
+    io.use(async (socket, next) => {
+        try {
+            const token = socket.handshake.auth?.token;
+            if (typeof token !== "string" || !token) {
+                next(new Error("Authentication required"));
+                return;
+            }
+            const { data, error } = await supabase_1.supabase.auth.getUser(token);
+            if (error || !data.user) {
+                next(new Error("Invalid or expired token"));
+                return;
+            }
+            socket.data.userId = data.user.id;
+            next();
+        }
+        catch {
+            next(new Error("Authentication failed"));
+        }
+    });
     io.on("connection", (socket) => {
-        socket.on("setup", (userId) => {
-            socket.data.userId = userId;
-            addOnlineUser(userId, socket.id);
-            socket.join(userId);
-            socket.emit("connected");
-        });
-        socket.on("join chat", (room, userId) => {
-            if (!room || room === "undefined") {
-                console.warn(`${userId} attempted to join invalid room: ${room}`);
-                return;
-            }
-            socket.join(room);
-            console.log(userId + " Joined Chat room: " + room);
-        });
-        socket.on("new message", (newMessageRecieved) => {
-            const roomId = newMessageRecieved?.chat_id ||
-                newMessageRecieved?.chatId ||
-                newMessageRecieved?.chat?.id ||
-                newMessageRecieved?.chat?._id;
-            if (!roomId || roomId === "undefined") {
-                return console.log("new message missing room/chat id");
-            }
-            socket.to(roomId).emit("message recieved", newMessageRecieved);
-        });
-        socket.on("note:join", (noteId, userId) => {
-            socket.join(noteId);
-            console.log(`${userId} joined notes room: ${noteId}`);
-        });
-        socket.on("note:update", ({ noteId, content }) => {
-            socket.to(noteId).emit("note:content-update", { noteId, content });
-        });
-        socket.on("note:save", async ({ noteId, content }) => {
+        const userId = socket.data.userId;
+        addOnlineUser(userId, socket.id);
+        socket.join(`user:${userId}`);
+        socket.emit("connected");
+        // Kept for backwards-compatible clients. Identity comes from the verified token.
+        socket.on("setup", () => socket.emit("connected"));
+        socket.on("join chat", async (chatId) => {
             try {
-                await supabase_1.supabase.from("notes").update({ content }).eq("id", noteId);
-                console.log(`Note ${noteId} saved to DB`);
+                if (typeof chatId !== "string" || !(await (0, access_1.isChatMember)(chatId, userId))) {
+                    socket.emit("realtime:error", { resource: "chat", message: "Access denied" });
+                    return;
+                }
+                socket.join(`chat:${chatId}`);
             }
             catch (error) {
-                console.error("Error saving note:", error);
+                console.error("[socket] join chat", error);
+                socket.emit("realtime:error", { resource: "chat", message: "Unable to join workspace" });
             }
         });
-        socket.on("whiteboard:join", (whiteboardId, userId) => {
-            socket.join(whiteboardId);
-            console.log(`${userId} joined whiteboard room: ${whiteboardId}`);
-        });
-        socket.on("whiteboard:draw", (data) => {
-            const { whiteboardId, drawingData } = data;
-            socket.to(whiteboardId).emit("whiteboard:update", drawingData);
-        });
-        socket.on("whiteboard:save", async ({ whiteboardId, whiteboardData }) => {
+        socket.on("new message", async (payload) => {
+            const chatId = payload?.chat_id ?? payload?.chatId;
+            const senderId = payload?.sender?.id ?? payload?.sender?._id;
             try {
-                await supabase_1.supabase
+                if (!chatId ||
+                    senderId !== userId ||
+                    !(await (0, access_1.isChatMember)(chatId, userId)))
+                    return;
+                socket.to(`chat:${chatId}`).emit("message received", payload);
+            }
+            catch (error) {
+                console.error("[socket] new message", error);
+            }
+        });
+        socket.on("note:join", async (noteId) => {
+            var _a;
+            try {
+                const chatId = typeof noteId === "string" ? await (0, access_1.getNoteChatId)(noteId) : null;
+                if (!chatId || !(await (0, access_1.isChatMember)(chatId, userId))) {
+                    socket.emit("realtime:error", { resource: "note", message: "Access denied" });
+                    return;
+                }
+                socket.join(`note:${noteId}`);
+                const noteChats = ((_a = socket.data).noteChats ?? (_a.noteChats = {}));
+                noteChats[noteId] = chatId;
+            }
+            catch (error) {
+                console.error("[socket] note:join", error);
+            }
+        });
+        socket.on("note:leave", (noteId) => {
+            socket.leave(`note:${noteId}`);
+            const noteChats = (socket.data.noteChats ?? {});
+            delete noteChats[noteId];
+        });
+        socket.on("note:update", (payload) => {
+            if (!payload?.noteId ||
+                typeof payload.content !== "string" ||
+                payload.content.length > 100000 ||
+                !socket.rooms.has(`note:${payload.noteId}`))
+                return;
+            socket.to(`note:${payload.noteId}`).emit("note:content-update", payload);
+        });
+        socket.on("note:save", async (payload) => {
+            const { noteId, content } = payload ?? {};
+            if (!noteId || typeof content !== "string" || content.length > 100000)
+                return;
+            try {
+                if (!socket.rooms.has(`note:${noteId}`))
+                    throw new Error("Access denied");
+                const { error } = await supabase_1.supabase
+                    .from("notes")
+                    .update({ content, updated_at: new Date().toISOString() })
+                    .eq("id", noteId);
+                if (error)
+                    throw error;
+                socket.emit("note:saved", { noteId, success: true });
+            }
+            catch (error) {
+                console.error("[socket] note:save", error);
+                socket.emit("note:save-error", { noteId, message: "Failed to save note" });
+            }
+        });
+        socket.on("whiteboard:join", async (whiteboardId) => {
+            var _a;
+            try {
+                const chatId = typeof whiteboardId === "string" ? await (0, access_1.getWhiteboardChatId)(whiteboardId) : null;
+                if (!chatId || !(await (0, access_1.isChatMember)(chatId, userId))) {
+                    socket.emit("realtime:error", { resource: "whiteboard", message: "Access denied" });
+                    return;
+                }
+                socket.join(`whiteboard:${whiteboardId}`);
+                const whiteboardChats = ((_a = socket.data).whiteboardChats ?? (_a.whiteboardChats = {}));
+                whiteboardChats[whiteboardId] = chatId;
+            }
+            catch (error) {
+                console.error("[socket] whiteboard:join", error);
+            }
+        });
+        socket.on("whiteboard:leave", (whiteboardId) => {
+            socket.leave(`whiteboard:${whiteboardId}`);
+            const whiteboardChats = (socket.data.whiteboardChats ?? {});
+            delete whiteboardChats[whiteboardId];
+        });
+        socket.on("whiteboard:draw", (payload) => {
+            if (!payload?.whiteboardId ||
+                serializedSize(payload.drawingData) > 1500000 ||
+                !socket.rooms.has(`whiteboard:${payload.whiteboardId}`))
+                return;
+            socket
+                .to(`whiteboard:${payload.whiteboardId}`)
+                .emit("whiteboard:update", payload.drawingData);
+        });
+        socket.on("whiteboard:clear-all", (payload) => {
+            if (!payload?.whiteboardId || !socket.rooms.has(`whiteboard:${payload.whiteboardId}`))
+                return;
+            socket.to(`whiteboard:${payload.whiteboardId}`).emit("whiteboard:clear-all");
+        });
+        socket.on("whiteboard:save", async (payload) => {
+            const { whiteboardId, whiteboardData } = payload ?? {};
+            if (!whiteboardId || serializedSize(whiteboardData) > 1500000)
+                return;
+            try {
+                if (!socket.rooms.has(`whiteboard:${whiteboardId}`))
+                    throw new Error("Access denied");
+                const { error } = await supabase_1.supabase
                     .from("whiteboards")
-                    .update({ data: whiteboardData })
+                    .update({ data: whiteboardData, updated_at: new Date().toISOString() })
                     .eq("id", whiteboardId);
-                console.log(`Whiteboard ${whiteboardId} saved to DB`);
+                if (error)
+                    throw error;
+                socket.emit("whiteboard:saved", { whiteboardId, success: true });
             }
             catch (error) {
-                console.error("Error saving whiteboard:", error);
+                console.error("[socket] whiteboard:save", error);
+                socket.emit("whiteboard:save-error", { whiteboardId, message: "Failed to save whiteboard" });
             }
         });
-        socket.on("disconnect", () => {
-            const userId = socket.data.userId;
-            if (!userId)
-                return;
-            removeOnlineUser(userId, socket.id);
+        socket.on("meeting:join", async (callId) => {
+            try {
+                const { data: meeting, error } = await supabase_1.supabase
+                    .from("meetings")
+                    .select("id, chat_id")
+                    .eq("call_id", callId)
+                    .maybeSingle();
+                if (error)
+                    throw error;
+                if (!meeting || !(await (0, access_1.isChatMember)(meeting.chat_id, userId)))
+                    return;
+                const { data: participant, error: participantError } = await supabase_1.supabase
+                    .from("meeting_participants")
+                    .select("user_id")
+                    .eq("meeting_id", meeting.id)
+                    .eq("user_id", userId)
+                    .maybeSingle();
+                if (participantError)
+                    throw participantError;
+                if (!participant)
+                    return;
+                socket.join(`meeting:${callId}`);
+                socket.to(`meeting:${callId}`).emit("meeting:user-joined", { userId });
+            }
+            catch (error) {
+                console.error("[socket] meeting:join", error);
+            }
         });
+        socket.on("meeting:leave", (callId) => {
+            socket.leave(`meeting:${callId}`);
+            socket.to(`meeting:${callId}`).emit("meeting:user-left", { userId });
+        });
+        socket.on("disconnect", () => removeOnlineUser(userId, socket.id));
     });
     return io;
 };

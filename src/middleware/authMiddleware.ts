@@ -24,7 +24,10 @@ export const authMiddleware = async (
     const { data, error } = await supabase.auth.getUser(token);
 
     if (error || !data.user) {
-      res.status(401).json({ message: "Invalid or expired token" });
+      const status = error && error.status !== 401 && error.status !== 403 ? 503 : 401;
+      res.status(status).json({
+        message: status === 401 ? "Invalid or expired token" : "Authentication service unavailable",
+      });
       return;
     }
 
@@ -32,6 +35,6 @@ export const authMiddleware = async (
     next();
   } catch (error) {
     console.error("Auth middleware error:", error);
-    res.status(401).json({ message: "Not authenticated" });
+    res.status(503).json({ message: "Authentication service unavailable" });
   }
 };
