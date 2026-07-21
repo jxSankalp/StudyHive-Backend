@@ -15,35 +15,21 @@ import videoRoutes from "./routes/videoRoutes";
 import whiteboardRoutes from "./routes/whiteboardRoutes";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import { corsOrigin, validateCorsConfiguration } from "./lib/cors";
 
 const app = express();
 const server = createServer(app);
 
-const configuredOrigins = new Set(
-  [process.env.CLIENT_URL, ...(process.env.CLIENT_URLS ?? "").split(",")]
-    .map((origin) => origin?.trim().replace(/\/$/, ""))
-    .filter((origin): origin is string => Boolean(origin))
-);
-
-const isAllowedOrigin = (origin?: string) => {
-  if (!origin) return true;
-  const normalized = origin.replace(/\/$/, "");
-  if (configuredOrigins.has(normalized)) return true;
-  return process.env.NODE_ENV !== "production" &&
-    /^http:\/\/(localhost|127\.0\.0\.1|\[::1\]):\d+$/.test(normalized);
-};
+validateCorsConfiguration();
 
 // CORS: allow any localhost port in development (handles Vite port changes)
 app.use(
   cors({
-    origin: (origin, callback) => {
-      if (isAllowedOrigin(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error(`CORS: origin '${origin}' not allowed`));
-      }
-    },
-    credentials: true,
+    origin: corsOrigin,
+    credentials: false,
+    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Authorization", "Content-Type"],
+    maxAge: 86400,
   })
 );
 

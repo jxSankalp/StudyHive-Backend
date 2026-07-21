@@ -13,7 +13,7 @@ services:
       - key: CLIENT_URL
         sync: false
       - key: CLIENT_URLS
-        sync: false
+        value: https://*.vercel.app
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY

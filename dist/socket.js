@@ -4,6 +4,7 @@ exports.getIO = exports.initSocket = exports.revokeChatSocketAccess = exports.ge
 const socket_io_1 = require("socket.io");
 const access_1 = require("./lib/access");
 const supabase_1 = require("./lib/supabase");
+const cors_1 = require("./lib/cors");
 let io;
 const onlineUsers = new Map();
 const addOnlineUser = (userId, socketId) => {
@@ -45,18 +46,6 @@ const revokeChatSocketAccess = async (userId, chatId) => {
     }
 };
 exports.revokeChatSocketAccess = revokeChatSocketAccess;
-const configuredOrigins = new Set([process.env.CLIENT_URL, ...(process.env.CLIENT_URLS ?? "").split(",")]
-    .map((origin) => origin?.trim().replace(/\/$/, ""))
-    .filter((origin) => Boolean(origin)));
-const isAllowedOrigin = (origin) => {
-    if (!origin)
-        return true;
-    const normalized = origin.replace(/\/$/, "");
-    if (configuredOrigins.has(normalized))
-        return true;
-    return process.env.NODE_ENV !== "production" &&
-        /^http:\/\/(localhost|127\.0\.0\.1|\[::1\]):\d+$/.test(normalized);
-};
 const serializedSize = (value) => {
     try {
         return JSON.stringify(value).length;
@@ -71,10 +60,8 @@ const initSocket = (server) => {
         pingInterval: 25000,
         maxHttpBufferSize: 2000000,
         cors: {
-            origin: (origin, callback) => isAllowedOrigin(origin)
-                ? callback(null, true)
-                : callback(new Error(`CORS: origin '${origin}' not allowed`)),
-            credentials: true,
+            origin: cors_1.corsOrigin,
+            credentials: false,
         },
     });
     io.use(async (socket, next) => {
