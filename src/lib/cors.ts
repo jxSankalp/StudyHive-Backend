@@ -1,8 +1,21 @@
 type OriginCallback = (error: Error | null, allow?: boolean) => void;
 
-const rawRules = [process.env.CLIENT_URL, ...(process.env.CLIENT_URLS ?? "").split(",")]
-  .map((rule) => rule?.trim().replace(/\/$/, ""))
-  .filter((rule): rule is string => Boolean(rule));
+// Vercel production and preview deployments use HTTPS subdomains of
+// vercel.app. Keep this platform rule in code because existing Render services
+// do not automatically receive newly added Blueprint environment variables.
+const BUILT_IN_ORIGIN_RULES = ["https://*.vercel.app"];
+
+const rawRules = Array.from(
+  new Set(
+    [
+      ...BUILT_IN_ORIGIN_RULES,
+      process.env.CLIENT_URL,
+      ...(process.env.CLIENT_URLS ?? "").split(","),
+    ]
+      .map((rule) => rule?.trim().replace(/\/$/, ""))
+      .filter((rule): rule is string => Boolean(rule))
+  )
+);
 
 const escapeRegExp = (value: string) => value.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
 
@@ -32,11 +45,7 @@ export const isAllowedOrigin = (origin?: string): boolean => {
 };
 
 export const validateCorsConfiguration = () => {
-  if (process.env.NODE_ENV === "production" && rawRules.length === 0) {
-    console.warn(
-      "[CORS] No production origins configured. Set CLIENT_URL or CLIENT_URLS; browser requests will be rejected."
-    );
-  }
+  console.log(`[CORS] Allowed origin rules: ${rawRules.join(", ")}`);
 };
 
 export const corsOrigin = (origin: string | undefined, callback: OriginCallback) => {
