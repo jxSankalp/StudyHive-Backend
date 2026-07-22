@@ -6,6 +6,7 @@ import {
   getChatStats,
   removeFromGroup,
   renameGroup,
+  updateMemberRole,
 } from "../controllers/chatController";
 import { authMiddleware } from "../middleware/authMiddleware";
 
@@ -20,5 +21,6 @@ router.post("/", createGroupChat);
 router.route("/rename").put(renameGroup);
 router.route("/groupremove").put(removeFromGroup);
 router.route("/groupadd").put(addToGroup);
+router.route("/role").put(updateMemberRole);
 
 export default router;

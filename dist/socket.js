@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getIO = exports.initSocket = exports.revokeChatSocketAccess = exports.getOnlineUserCountByIds = void 0;
+exports.getIO = exports.initSocket = exports.revokeChatSocketAccess = exports.broadcastToChat = exports.notifyUsers = exports.getOnlineUserCountByIds = void 0;
 const socket_io_1 = require("socket.io");
 const access_1 = require("./lib/access");
 const supabase_1 = require("./lib/supabase");
@@ -22,6 +22,18 @@ const removeOnlineUser = (userId, socketId) => {
 };
 const getOnlineUserCountByIds = (userIds) => Array.from(new Set(userIds)).filter((userId) => onlineUsers.has(userId)).length;
 exports.getOnlineUserCountByIds = getOnlineUserCountByIds;
+const notifyUsers = (userIds, payload) => {
+    if (!io)
+        return;
+    for (const userId of new Set(userIds))
+        io.to(`user:${userId}`).emit("notification:new", payload);
+};
+exports.notifyUsers = notifyUsers;
+const broadcastToChat = (chatId, event, payload) => {
+    if (io)
+        io.to(`chat:${chatId}`).emit(event, payload);
+};
+exports.broadcastToChat = broadcastToChat;
 const revokeChatSocketAccess = async (userId, chatId) => {
     if (!io)
         return;
@@ -105,13 +117,26 @@ const initSocket = (server) => {
         });
         socket.on("new message", async (payload) => {
             const chatId = payload?.chat_id ?? payload?.chatId;
-            const senderId = payload?.sender?.id ?? payload?.sender?._id;
+            const messageId = payload?.id ?? payload?._id;
             try {
-                if (!chatId ||
-                    senderId !== userId ||
-                    !(await (0, access_1.isChatMember)(chatId, userId)))
+                if (!chatId || !messageId || !(await (0, access_1.isChatMember)(chatId, userId)))
                     return;
-                socket.to(`chat:${chatId}`).emit("message received", payload);
+                // Never relay client-provided message content. Re-read the persisted row
+                // so a member cannot spoof a sender, message id, or HTML payload over the socket.
+                const { data: message, error } = await supabase_1.supabase
+                    .from("messages")
+                    .select(`id, content, created_at, edited_at, deleted_at, chat_id, reply_to_id,
+            sender:profiles!messages_sender_id_fkey ( id, username, email, photo ),
+            reply_to:messages!messages_reply_to_id_fkey ( id, content, deleted_at, sender:profiles!messages_sender_id_fkey ( id, username ) ),
+            reactions:message_reactions ( emoji, user_id )`)
+                    .eq("id", messageId)
+                    .eq("chat_id", chatId)
+                    .eq("sender_id", userId)
+                    .maybeSingle();
+                if (error)
+                    throw error;
+                if (message)
+                    socket.to(`chat:${chatId}`).emit("message received", message);
             }
             catch (error) {
                 console.error("[socket] new message", error);

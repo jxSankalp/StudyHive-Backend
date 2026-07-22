@@ -1,7 +1,7 @@
 /// <reference path="../types/index.d.ts" />
 import { Request, Response } from "express";
 import { supabase } from "../lib/supabase";
-import { isChatAdmin, isChatMember, isNonEmptyString } from "../lib/access";
+import { getChatRole, isChatAdmin, isChatMember, isNonEmptyString } from "../lib/access";
 import { getOnlineUserCountByIds, revokeChatSocketAccess } from "../socket";
 
 const normalizeIds = (values: unknown): string[] => {
@@ -35,7 +35,7 @@ export const getAllChats = async (req: Request, res: Response): Promise<void> =>
       .from("chats")
       .select(`
         id, chat_name, description, group_admin_id, latest_message_id, created_at, updated_at,
-        chat_members ( user_id, profiles ( id, username, email, photo ) ),
+        chat_members ( user_id, role, joined_at, profiles ( id, username, email, photo ) ),
         messages!chats_latest_message_id_fkey ( id, content, created_at )
       `)
       .in("id", chatIds)
@@ -99,6 +99,7 @@ export const createGroupChat = async (req: Request, res: Response): Promise<void
     const memberRows = [...requestedIds, adminId].map((userId) => ({
       chat_id: chat.id,
       user_id: userId,
+      role: userId === adminId ? "owner" : "member",
     }));
     const { error: memberError } = await supabase.from("chat_members").insert(memberRows);
     if (memberError) throw memberError;
@@ -159,15 +160,27 @@ export const removeFromGroup = async (req: Request, res: Response): Promise<void
   }
 
   let membershipRemoved = false;
+  let removedRole: "owner" | "admin" | "member" = "member";
   try {
-    if (!(await isChatAdmin(chatId, actorId))) {
+    const actorRole = await getChatRole(chatId, actorId);
+    if (actorRole !== "owner" && actorRole !== "admin") {
       res.status(403).json({ error: "Only the workspace admin can remove members" });
       return;
     }
-    if (targetId === actorId) {
-      res.status(400).json({ error: "The workspace admin cannot remove themselves" });
+    const targetRole = await getChatRole(chatId, targetId);
+    if (!targetRole) {
+      res.status(404).json({ error: "Member not found" });
       return;
     }
+    if (targetId === actorId || targetRole === "owner") {
+      res.status(400).json({ error: "The workspace owner cannot be removed" });
+      return;
+    }
+    if (actorRole === "admin" && targetRole === "admin") {
+      res.status(403).json({ error: "Only the owner can remove another admin" });
+      return;
+    }
+    removedRole = targetRole;
     const { error } = await supabase
       .from("chat_members")
       .delete()
@@ -198,7 +211,7 @@ export const removeFromGroup = async (req: Request, res: Response): Promise<void
     if (membershipRemoved) {
       const { error: restoreError } = await supabase
         .from("chat_members")
-        .upsert({ chat_id: chatId, user_id: targetId }, { onConflict: "chat_id,user_id" });
+        .upsert({ chat_id: chatId, user_id: targetId, role: removedRole }, { onConflict: "chat_id,user_id" });
       if (restoreError) console.error("[removeFromGroup] rollback failed", restoreError);
     }
     console.error("[removeFromGroup]", error);
@@ -234,7 +247,7 @@ export const addToGroup = async (req: Request, res: Response): Promise<void> => 
       return;
     }
 
-    const rows = userIds.map((userId) => ({ chat_id: chatId, user_id: userId }));
+    const rows = userIds.map((userId) => ({ chat_id: chatId, user_id: userId, role: "member" }));
     const { error } = await supabase
       .from("chat_members")
       .upsert(rows, { onConflict: "chat_id,user_id", ignoreDuplicates: true });
@@ -242,7 +255,7 @@ export const addToGroup = async (req: Request, res: Response): Promise<void> => 
 
     const { data: chat, error: chatError } = await supabase
       .from("chats")
-      .select("id, chat_name, chat_members ( user_id, profiles ( id, username, email, photo ) )")
+      .select("id, chat_name, chat_members ( user_id, role, joined_at, profiles ( id, username, email, photo ) )")
       .eq("id", chatId)
       .single();
     if (chatError) throw chatError;
@@ -272,23 +285,50 @@ export const getChatStats = async (req: Request, res: Response): Promise<void> =
     }
     const { data: chat, error } = await supabase
       .from("chats")
-      .select("id, chat_name, group_admin_id, chat_members ( user_id )")
+      .select("id, chat_name, group_admin_id, chat_members ( user_id, role )")
       .eq("id", chatId)
       .single();
     if (error) throw error;
 
-    const memberIds = (chat.chat_members as Array<{ user_id: string }> | null)
+    const typedMembers = (chat.chat_members as Array<{ user_id: string; role?: string }> | null) ?? [];
+    const memberIds = typedMembers
       ?.map((member) => member.user_id)
       .filter(Boolean) ?? [];
+    const currentRole = typedMembers.find((member) => member.user_id === userId)?.role ?? "member";
     res.json({
       chatId: chat.id,
       chatName: chat.chat_name,
       totalMembers: memberIds.length,
       totalOnline: getOnlineUserCountByIds(memberIds),
-      canManage: chat.group_admin_id === userId,
+      canManage: currentRole === "owner" || currentRole === "admin",
+      role: currentRole,
     });
   } catch (error) {
     console.error("[getChatStats]", error);
     res.status(500).json({ error: "Failed to load workspace statistics" });
+  }
+};
+
+export const updateMemberRole = async (req: Request, res: Response): Promise<void> => {
+  const actorId = req.user?.userId;
+  const chatId = typeof req.body.chatId === "string" ? req.body.chatId : "";
+  const targetId = typeof req.body.userId === "string" ? req.body.userId : "";
+  const role = req.body.role === "admin" ? "admin" : req.body.role === "member" ? "member" : "";
+  if (!actorId) { res.status(401).json({ error: "Unauthorized" }); return; }
+  if (!chatId || !targetId || !role) { res.status(400).json({ error: "chatId, userId, and a valid role are required" }); return; }
+  try {
+    if ((await getChatRole(chatId, actorId)) !== "owner") {
+      res.status(403).json({ error: "Only the workspace owner can manage admin roles" });
+      return;
+    }
+    const targetRole = await getChatRole(chatId, targetId);
+    if (!targetRole) { res.status(404).json({ error: "Member not found" }); return; }
+    if (targetRole === "owner") { res.status(400).json({ error: "The owner role cannot be changed" }); return; }
+    const { data, error } = await supabase.from("chat_members").update({ role }).eq("chat_id", chatId).eq("user_id", targetId).select("user_id, role").single();
+    if (error) throw error;
+    res.json({ member: data });
+  } catch (error) {
+    console.error("[updateMemberRole]", error);
+    res.status(500).json({ error: "Failed to update member role" });
   }
 };

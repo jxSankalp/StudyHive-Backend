@@ -3,7 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.updateNote = exports.deleteNote = exports.getNoteById = exports.createNote = exports.allNotes = void 0;
 const access_1 = require("../lib/access");
 const supabase_1 = require("../lib/supabase");
-const NOTE_SELECT = `id, name, content, chat_id, created_at, updated_at,
+const NOTE_SELECT = `id, name, content, chat_id, created_at, updated_at, is_pinned, tags,
   created_by:profiles!notes_created_by_id_fkey ( id, username, email )`;
 const mapNote = (note) => ({
     _id: note.id,
@@ -12,6 +12,8 @@ const mapNote = (note) => ({
     chat: note.chat_id,
     createdAt: note.created_at,
     updatedAt: note.updated_at,
+    isPinned: note.is_pinned === true,
+    tags: Array.isArray(note.tags) ? note.tags : [],
     createdBy: note.created_by
         ? { _id: note.created_by.id, username: note.created_by.username, email: note.created_by.email }
         : null,
@@ -19,6 +21,15 @@ const mapNote = (note) => ({
 const requireNoteAccess = async (noteId, userId) => {
     const chatId = await (0, access_1.getNoteChatId)(noteId);
     return chatId ? { chatId, allowed: await (0, access_1.isChatMember)(chatId, userId) } : null;
+};
+const normalizeTags = (value) => {
+    if (!Array.isArray(value))
+        return null;
+    const tags = [...new Set(value
+            .filter((tag) => typeof tag === "string")
+            .map((tag) => tag.trim().replace(/^#/, "").toLowerCase())
+            .filter(Boolean))];
+    return tags.length <= 10 && tags.every((tag) => tag.length <= 24) ? tags : null;
 };
 const allNotes = async (req, res) => {
     const userId = req.user?.userId;
@@ -40,7 +51,8 @@ const allNotes = async (req, res) => {
             .from("notes")
             .select(NOTE_SELECT)
             .eq("chat_id", chatId)
-            .order("created_at", { ascending: false });
+            .order("is_pinned", { ascending: false })
+            .order("updated_at", { ascending: false });
         if (error)
             throw error;
         res.json({ data: data.map(mapNote) });
@@ -56,11 +68,12 @@ const createNote = async (req, res) => {
     const chatId = typeof req.body.chatId === "string" ? req.body.chatId : "";
     const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
     const content = typeof req.body.content === "string" ? req.body.content : "";
+    const tags = req.body.tags === undefined ? [] : normalizeTags(req.body.tags);
     if (!userId) {
         res.status(401).json({ error: "Unauthorized" });
         return;
     }
-    if (!chatId || !name || name.length > 100 || content.length > 100000) {
+    if (!chatId || !name || name.length > 100 || content.length > 100000 || tags === null) {
         res.status(400).json({ error: "A valid chatId, name, and content are required" });
         return;
     }
@@ -71,7 +84,7 @@ const createNote = async (req, res) => {
         }
         const { data, error } = await supabase_1.supabase
             .from("notes")
-            .insert({ name, content, chat_id: chatId, created_by_id: userId })
+            .insert({ name, content, tags, is_pinned: false, chat_id: chatId, created_by_id: userId })
             .select(NOTE_SELECT)
             .single();
         if (error)
@@ -178,7 +191,22 @@ const updateNote = async (req, res) => {
         }
         updates.name = name;
     }
-    if (updates.content === undefined && updates.name === undefined) {
+    if (req.body.tags !== undefined) {
+        const tags = normalizeTags(req.body.tags);
+        if (tags === null) {
+            res.status(400).json({ error: "Tags must contain at most 10 values of 24 characters or fewer" });
+            return;
+        }
+        updates.tags = tags;
+    }
+    if (req.body.isPinned !== undefined) {
+        if (typeof req.body.isPinned !== "boolean") {
+            res.status(400).json({ error: "Invalid pinned state" });
+            return;
+        }
+        updates.is_pinned = req.body.isPinned;
+    }
+    if (updates.content === undefined && updates.name === undefined && updates.tags === undefined && updates.is_pinned === undefined) {
         res.status(400).json({ error: "No changes provided" });
         return;
     }

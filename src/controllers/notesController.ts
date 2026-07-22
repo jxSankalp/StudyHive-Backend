@@ -10,10 +10,12 @@ interface NoteRow {
   chat_id: string;
   created_at: string;
   updated_at: string;
+  is_pinned: boolean | null;
+  tags: string[] | null;
   created_by: { id: string; username: string; email: string } | null;
 }
 
-const NOTE_SELECT = `id, name, content, chat_id, created_at, updated_at,
+const NOTE_SELECT = `id, name, content, chat_id, created_at, updated_at, is_pinned, tags,
   created_by:profiles!notes_created_by_id_fkey ( id, username, email )`;
 
 const mapNote = (note: NoteRow) => ({
@@ -23,6 +25,8 @@ const mapNote = (note: NoteRow) => ({
   chat: note.chat_id,
   createdAt: note.created_at,
   updatedAt: note.updated_at,
+  isPinned: note.is_pinned === true,
+  tags: Array.isArray(note.tags) ? note.tags : [],
   createdBy: note.created_by
     ? { _id: note.created_by.id, username: note.created_by.username, email: note.created_by.email }
     : null,
@@ -31,6 +35,15 @@ const mapNote = (note: NoteRow) => ({
 const requireNoteAccess = async (noteId: string, userId: string) => {
   const chatId = await getNoteChatId(noteId);
   return chatId ? { chatId, allowed: await isChatMember(chatId, userId) } : null;
+};
+
+const normalizeTags = (value: unknown): string[] | null => {
+  if (!Array.isArray(value)) return null;
+  const tags = [...new Set(value
+    .filter((tag): tag is string => typeof tag === "string")
+    .map((tag) => tag.trim().replace(/^#/, "").toLowerCase())
+    .filter(Boolean))];
+  return tags.length <= 10 && tags.every((tag) => tag.length <= 24) ? tags : null;
 };
 
 export const allNotes = async (req: Request, res: Response): Promise<void> => {
@@ -54,7 +67,8 @@ export const allNotes = async (req: Request, res: Response): Promise<void> => {
       .from("notes")
       .select(NOTE_SELECT)
       .eq("chat_id", chatId)
-      .order("created_at", { ascending: false });
+      .order("is_pinned", { ascending: false })
+      .order("updated_at", { ascending: false });
     if (error) throw error;
     res.json({ data: (data as unknown as NoteRow[]).map(mapNote) });
   } catch (error) {
@@ -68,11 +82,12 @@ export const createNote = async (req: Request, res: Response): Promise<void> => 
   const chatId = typeof req.body.chatId === "string" ? req.body.chatId : "";
   const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
   const content = typeof req.body.content === "string" ? req.body.content : "";
+  const tags = req.body.tags === undefined ? [] : normalizeTags(req.body.tags);
   if (!userId) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
-  if (!chatId || !name || name.length > 100 || content.length > 100_000) {
+  if (!chatId || !name || name.length > 100 || content.length > 100_000 || tags === null) {
     res.status(400).json({ error: "A valid chatId, name, and content are required" });
     return;
   }
@@ -84,7 +99,7 @@ export const createNote = async (req: Request, res: Response): Promise<void> => 
     }
     const { data, error } = await supabase
       .from("notes")
-      .insert({ name, content, chat_id: chatId, created_by_id: userId })
+      .insert({ name, content, tags, is_pinned: false, chat_id: chatId, created_by_id: userId })
       .select(NOTE_SELECT)
       .single();
     if (error) throw error;
@@ -167,7 +182,7 @@ export const updateNote = async (req: Request, res: Response): Promise<void> => 
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
-  const updates: { content?: string; name?: string; updated_at: string } = {
+  const updates: { content?: string; name?: string; tags?: string[]; is_pinned?: boolean; updated_at: string } = {
     updated_at: new Date().toISOString(),
   };
   if (req.body.content !== undefined) {
@@ -185,7 +200,22 @@ export const updateNote = async (req: Request, res: Response): Promise<void> => 
     }
     updates.name = name;
   }
-  if (updates.content === undefined && updates.name === undefined) {
+  if (req.body.tags !== undefined) {
+    const tags = normalizeTags(req.body.tags);
+    if (tags === null) {
+      res.status(400).json({ error: "Tags must contain at most 10 values of 24 characters or fewer" });
+      return;
+    }
+    updates.tags = tags;
+  }
+  if (req.body.isPinned !== undefined) {
+    if (typeof req.body.isPinned !== "boolean") {
+      res.status(400).json({ error: "Invalid pinned state" });
+      return;
+    }
+    updates.is_pinned = req.body.isPinned;
+  }
+  if (updates.content === undefined && updates.name === undefined && updates.tags === undefined && updates.is_pinned === undefined) {
     res.status(400).json({ error: "No changes provided" });
     return;
   }

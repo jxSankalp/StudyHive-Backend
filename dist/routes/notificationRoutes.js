@@ -4,14 +4,11 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
-const messageController_1 = require("../controllers/messageController");
 const authMiddleware_1 = require("../middleware/authMiddleware");
+const notificationController_1 = require("../controllers/notificationController");
 const router = express_1.default.Router();
-// Protect all routes
 router.use(authMiddleware_1.authMiddleware);
-router.route("/:chatId").get(messageController_1.allMessages);
-router.route("/").post(messageController_1.sendMessage);
-router.patch("/:messageId", messageController_1.updateMessage);
-router.delete("/:messageId", messageController_1.deleteMessage);
-router.post("/:messageId/reactions", messageController_1.toggleReaction);
+router.get("/", notificationController_1.listNotifications);
+router.patch("/read-all", notificationController_1.markAllNotificationsRead);
+router.patch("/:notificationId/read", notificationController_1.markNotificationRead);
 exports.default = router;

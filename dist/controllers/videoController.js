@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.updateMeetingStatus = exports.getMeetingsForChat = exports.generateUserToken = exports.createVideoCall = void 0;
 const supabase_1 = require("../lib/supabase");
 const StreamClient_1 = require("../lib/StreamClient");
+const socket_1 = require("../socket");
 // ─────────────────────────────────────────────────────────────
 // Helper: deduplicate an array by a key
 // ─────────────────────────────────────────────────────────────
@@ -22,6 +23,13 @@ function dedupeBy(arr, key) {
 const createVideoCall = async (req, res) => {
     const { chatId, meetName } = req.body;
     const userId = req.user?.userId;
+    const description = typeof req.body.description === "string" ? req.body.description.trim() : "";
+    const durationMinutes = Number(req.body.durationMinutes ?? 30);
+    const requestedDate = typeof req.body.scheduledAt === "string" && req.body.scheduledAt ? new Date(req.body.scheduledAt) : new Date();
+    const requestedParticipantIds = Array.isArray(req.body.participantIds)
+        ? Array.from(new Set(req.body.participantIds.filter((id) => typeof id === "string" && id.length > 0)))
+        : [];
+    const shouldNotify = req.body.notify !== false;
     if (!userId) {
         res.status(401).json({ error: "Unauthorized" });
         return;
@@ -32,6 +40,14 @@ const createVideoCall = async (req, res) => {
     }
     if (typeof meetName === "string" && meetName.trim().length > 100) {
         res.status(400).json({ error: "Meeting name must be 100 characters or fewer" });
+        return;
+    }
+    if (description.length > 2000 || !Number.isInteger(durationMinutes) || durationMinutes < 15 || durationMinutes > 480 || Number.isNaN(requestedDate.getTime())) {
+        res.status(400).json({ error: "Invalid description, duration, or scheduled time" });
+        return;
+    }
+    if (requestedDate.getTime() < Date.now() - 60000 || requestedDate.getTime() > Date.now() + 366 * 24 * 60 * 60000) {
+        res.status(400).json({ error: "Scheduled time must be between now and one year from now" });
         return;
     }
     try {
@@ -70,7 +86,15 @@ const createVideoCall = async (req, res) => {
         // 4. Build unique stream users — deduplicate by user id to prevent
         //    duplicate participants in both Stream and meeting_participants
         const rawMembers = chat.chat_members.filter((member) => member.profiles != null);
-        const uniqueMembers = dedupeBy(rawMembers, "user_id");
+        const allMembers = dedupeBy(rawMembers, "user_id");
+        const allowedIds = new Set(allMembers.map((member) => member.user_id));
+        if (requestedParticipantIds.some((id) => !allowedIds.has(id))) {
+            res.status(400).json({ error: "Every invitee must be a workspace member" });
+            return;
+        }
+        const invitedIds = new Set(requestedParticipantIds.length ? requestedParticipantIds : allMembers.map((member) => member.user_id));
+        invitedIds.add(userId);
+        const uniqueMembers = allMembers.filter((member) => invitedIds.has(member.user_id));
         const streamUsers = uniqueMembers.map((m) => ({
             id: m.profiles.id,
             name: m.profiles.username,
@@ -94,6 +118,7 @@ const createVideoCall = async (req, res) => {
             },
         });
         // 7. Persist meeting row
+        const scheduledAt = requestedDate;
         const { data: meeting, error: meetErr } = await supabase_1.supabase
             .from("meetings")
             .insert({
@@ -102,8 +127,10 @@ const createVideoCall = async (req, res) => {
             chat_id: chatId,
             created_by_id: userId,
             status: "scheduled",
-            duration: "30 mins",
-            scheduled_at: new Date().toISOString(),
+            duration: `${durationMinutes} mins`,
+            duration_minutes: durationMinutes,
+            description: description || null,
+            scheduled_at: scheduledAt.toISOString(),
         })
             .select()
             .single();
@@ -125,12 +152,46 @@ const createVideoCall = async (req, res) => {
             await call.delete().catch((cleanupError) => console.error("[createVideoCall] Stream cleanup failed:", cleanupError));
             throw partErr;
         }
-        res.status(200).json({
+        // Keep scheduled meetings and the calendar consistent. If the calendar row
+        // cannot be created, roll back the meeting instead of leaving split state.
+        const { error: calendarError } = await supabase_1.supabase.from("calendar_events").insert({
+            chat_id: chatId,
+            created_by_id: userId,
+            meeting_id: meeting.id,
+            title: meeting.name,
+            description: description || "StudyHive video meeting",
+            starts_at: scheduledAt.toISOString(),
+            ends_at: new Date(scheduledAt.getTime() + durationMinutes * 60000).toISOString(),
+            all_day: false,
+            color: "emerald",
+        });
+        if (calendarError) {
+            console.error("[createVideoCall] calendar insert error:", calendarError);
+            await supabase_1.supabase.from("meetings").delete().eq("id", meeting.id);
+            await call.delete().catch((cleanupError) => console.error("[createVideoCall] Stream cleanup failed:", cleanupError));
+            throw calendarError;
+        }
+        if (shouldNotify) {
+            const recipientIds = uniqueMembers.map((member) => member.user_id).filter((id) => id !== userId);
+            if (recipientIds.length) {
+                const notificationRows = recipientIds.map((recipientId) => ({ user_id: recipientId, chat_id: chatId, type: "meeting_scheduled", title: `Meeting scheduled: ${meeting.name}`, body: description || `${chat.chat_name} · ${scheduledAt.toLocaleString()}`, entity_type: "meeting", entity_id: meeting.id }));
+                const { data: createdNotifications, error: notificationError } = await supabase_1.supabase.from("notifications").insert(notificationRows).select();
+                if (notificationError)
+                    console.error("[createVideoCall] notification insert error", notificationError);
+                else
+                    for (const notification of createdNotifications ?? [])
+                        (0, socket_1.notifyUsers)([notification.user_id], { ...notification, chatId, entityType: "meeting", entityId: meeting.id });
+            }
+        }
+        res.status(201).json({
             id: meeting.call_id,
             name: meeting.name,
             status: meeting.status,
             participants: streamUsers.length,
             duration: meeting.duration,
+            durationMinutes,
+            description: meeting.description ?? "",
+            scheduledAt: meeting.scheduled_at,
             scheduledTime: new Date(meeting.scheduled_at).toLocaleTimeString([], {
                 hour: "2-digit",
                 minute: "2-digit",
@@ -162,7 +223,7 @@ const generateUserToken = async (req, res) => {
     try {
         const { data: meeting, error: meetingError } = await supabase_1.supabase
             .from("meetings")
-            .select("id, status, chat_id, created_by_id")
+            .select("id, status, chat_id, created_by_id, scheduled_at")
             .eq("call_id", callId)
             .maybeSingle();
         if (meetingError)
@@ -173,6 +234,13 @@ const generateUserToken = async (req, res) => {
         }
         if (meeting.status === "ended") {
             res.status(410).json({ error: "This meeting has ended" });
+            return;
+        }
+        const scheduledAt = new Date(meeting.scheduled_at).getTime();
+        if (meeting.status === "scheduled" &&
+            Number.isFinite(scheduledAt) &&
+            scheduledAt > Date.now() + 15 * 60000) {
+            res.status(409).json({ error: "This meeting opens 15 minutes before its scheduled time" });
             return;
         }
         const { data: currentMembership, error: membershipError } = await supabase_1.supabase
@@ -261,7 +329,7 @@ const getMeetingsForChat = async (req, res) => {
         // duplicates that can arise from nested PostgREST joins
         const { data: meetings, error } = await supabase_1.supabase
             .from("meetings")
-            .select("id, call_id, name, status, duration, scheduled_at, created_by_id")
+            .select("id, call_id, name, description, status, duration, duration_minutes, scheduled_at, created_by_id")
             .eq("chat_id", chatId)
             .order("scheduled_at", { ascending: false });
         if (error)
@@ -294,6 +362,9 @@ const getMeetingsForChat = async (req, res) => {
             status: m.status || "scheduled",
             participants: participantCounts[m.id] ?? 0,
             duration: m.duration || "30 mins",
+            durationMinutes: m.duration_minutes || 30,
+            description: m.description || "",
+            scheduledAt: m.scheduled_at,
             scheduledTime: new Date(m.scheduled_at).toLocaleTimeString([], {
                 hour: "2-digit",
                 minute: "2-digit",

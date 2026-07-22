@@ -23,6 +23,15 @@ const removeOnlineUser = (userId: string, socketId: string) => {
 export const getOnlineUserCountByIds = (userIds: string[]): number =>
   Array.from(new Set(userIds)).filter((userId) => onlineUsers.has(userId)).length;
 
+export const notifyUsers = (userIds: string[], payload: Record<string, unknown>) => {
+  if (!io) return;
+  for (const userId of new Set(userIds)) io.to(`user:${userId}`).emit("notification:new", payload);
+};
+
+export const broadcastToChat = (chatId: string, event: string, payload: Record<string, unknown>) => {
+  if (io) io.to(`chat:${chatId}`).emit(event, payload);
+};
+
 export const revokeChatSocketAccess = async (userId: string, chatId: string) => {
   if (!io) return;
   const sockets = await io.in(`user:${userId}`).fetchSockets();
@@ -55,6 +64,8 @@ const serializedSize = (value: unknown) => {
 };
 
 interface MessagePayload {
+  id?: string;
+  _id?: string;
   chat_id?: string;
   chatId?: string;
   sender?: { id?: string; _id?: string };
@@ -114,14 +125,23 @@ export const initSocket = (server: HTTPServer) => {
 
     socket.on("new message", async (payload: MessagePayload) => {
       const chatId = payload?.chat_id ?? payload?.chatId;
-      const senderId = payload?.sender?.id ?? payload?.sender?._id;
+      const messageId = payload?.id ?? payload?._id;
       try {
-        if (
-          !chatId ||
-          senderId !== userId ||
-          !(await isChatMember(chatId, userId))
-        ) return;
-        socket.to(`chat:${chatId}`).emit("message received", payload);
+        if (!chatId || !messageId || !(await isChatMember(chatId, userId))) return;
+        // Never relay client-provided message content. Re-read the persisted row
+        // so a member cannot spoof a sender, message id, or HTML payload over the socket.
+        const { data: message, error } = await supabase
+          .from("messages")
+          .select(`id, content, created_at, edited_at, deleted_at, chat_id, reply_to_id,
+            sender:profiles!messages_sender_id_fkey ( id, username, email, photo ),
+            reply_to:messages!messages_reply_to_id_fkey ( id, content, deleted_at, sender:profiles!messages_sender_id_fkey ( id, username ) ),
+            reactions:message_reactions ( emoji, user_id )`)
+          .eq("id", messageId)
+          .eq("chat_id", chatId)
+          .eq("sender_id", userId)
+          .maybeSingle();
+        if (error) throw error;
+        if (message) socket.to(`chat:${chatId}`).emit("message received", message);
       } catch (error) {
         console.error("[socket] new message", error);
       }

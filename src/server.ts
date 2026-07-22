@@ -13,12 +13,18 @@ import messageRoutes from "./routes/messageRoutes";
 import notesRoutes from "./routes/notesRoutes";
 import videoRoutes from "./routes/videoRoutes";
 import whiteboardRoutes from "./routes/whiteboardRoutes";
+import calendarRoutes from "./routes/calendarRoutes";
+import taskRoutes from "./routes/taskRoutes";
+import notificationRoutes from "./routes/notificationRoutes";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import { corsOrigin, validateCorsConfiguration } from "./lib/cors";
+import { createRateLimiter } from "./middleware/rateLimiter";
 
 const app = express();
 const server = createServer(app);
+
+app.set("trust proxy", 1);
 
 validateCorsConfiguration();
 
@@ -36,6 +42,18 @@ app.use(
 app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
 
+const apiLimiter = createRateLimiter({ name: "api", windowMs: 15 * 60_000, limit: 500 });
+const authLimiter = createRateLimiter({ name: "auth", windowMs: 15 * 60_000, limit: 30 });
+const messageLimiter = createRateLimiter({ name: "messages", windowMs: 60_000, limit: 90 });
+const mutationLimiter = createRateLimiter({ name: "mutations", windowMs: 60_000, limit: 180 });
+
+app.use("/api", apiLimiter);
+app.use("/api/auth", authLimiter);
+app.use("/api/messages", messageLimiter);
+app.use("/api", (req, res, next) =>
+  ["POST", "PUT", "PATCH", "DELETE"].includes(req.method) ? mutationLimiter(req, res, next) : next()
+);
+
 // Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/meet", videoRoutes);
@@ -44,6 +62,9 @@ app.use("/api/chat", chatRoutes);
 app.use("/api/messages", messageRoutes);
 app.use("/api/notes", notesRoutes);
 app.use("/api/whiteboards", whiteboardRoutes);
+app.use("/api/calendar", calendarRoutes);
+app.use("/api/tasks", taskRoutes);
+app.use("/api/notifications", notificationRoutes);
 
 // Health check
 app.get("/health", (_req: Request, res: Response): void => {

@@ -23,14 +23,28 @@ export const isChatAdmin = async (
   userId: string
 ): Promise<boolean> => {
   const { data, error } = await supabase
-    .from("chats")
-    .select("id")
-    .eq("id", chatId)
-    .eq("group_admin_id", userId)
+    .from("chat_members")
+    .select("role")
+    .eq("chat_id", chatId)
+    .eq("user_id", userId)
+    .in("role", ["owner", "admin"])
     .maybeSingle();
 
   if (error) throw error;
   return Boolean(data);
+};
+
+export type ChatRole = "owner" | "admin" | "member";
+
+export const getChatRole = async (chatId: string, userId: string): Promise<ChatRole | null> => {
+  const { data, error } = await supabase
+    .from("chat_members")
+    .select("role")
+    .eq("chat_id", chatId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) throw error;
+  return data?.role === "owner" || data?.role === "admin" ? data.role : data ? "member" : null;
 };
 
 export const getNoteChatId = async (noteId: string): Promise<string | null> => {
