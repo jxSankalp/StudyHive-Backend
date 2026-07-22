@@ -4,6 +4,8 @@ import {
   createGroupChat,
   getAllChats,
   getChatStats,
+  getChatReadReceipts,
+  markChatRead,
   removeFromGroup,
   renameGroup,
   updateMemberRole,
@@ -17,6 +19,8 @@ router.use(authMiddleware);
 
 router.get("/", getAllChats);
 router.get("/:chatId/stats", getChatStats);
+router.get("/:chatId/reads", getChatReadReceipts);
+router.post("/:chatId/read", markChatRead);
 router.post("/", createGroupChat);
 router.route("/rename").put(renameGroup);
 router.route("/groupremove").put(removeFromGroup);

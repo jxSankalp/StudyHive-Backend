@@ -20,6 +20,7 @@ const whiteboardRoutes_1 = __importDefault(require("./routes/whiteboardRoutes"))
 const calendarRoutes_1 = __importDefault(require("./routes/calendarRoutes"));
 const taskRoutes_1 = __importDefault(require("./routes/taskRoutes"));
 const notificationRoutes_1 = __importDefault(require("./routes/notificationRoutes"));
+const fileRoutes_1 = __importDefault(require("./routes/fileRoutes"));
 const cors_1 = __importDefault(require("cors"));
 const cookie_parser_1 = __importDefault(require("cookie-parser"));
 const cors_2 = require("./lib/cors");
@@ -57,6 +58,7 @@ app.use("/api/whiteboards", whiteboardRoutes_1.default);
 app.use("/api/calendar", calendarRoutes_1.default);
 app.use("/api/tasks", taskRoutes_1.default);
 app.use("/api/notifications", notificationRoutes_1.default);
+app.use("/api/files", fileRoutes_1.default);
 // Health check
 app.get("/health", (_req, res) => {
     res.json({ ok: true });

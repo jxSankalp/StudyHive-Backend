@@ -4,6 +4,7 @@ exports.deleteTask = exports.updateTask = exports.createTask = exports.listTasks
 const access_1 = require("../lib/access");
 const supabase_1 = require("../lib/supabase");
 const socket_1 = require("../socket");
+const permissions_1 = require("../lib/permissions");
 const TASK_SELECT = `id, chat_id, title, description, status, priority, due_at, assignee_id, created_by_id, completed_at, created_at, updated_at,
   assignee:profiles!tasks_assignee_id_fkey ( id, username, email, photo ),
   created_by:profiles!tasks_created_by_id_fkey ( id, username, email, photo )`;
@@ -109,10 +110,10 @@ const updateTask = async (req, res) => {
             res.status(403).json({ error: "Access denied" });
             return;
         }
-        const canManage = role === "owner" || role === "admin" || existing.created_by_id === userId;
+        const canManage = (0, permissions_1.canEditTaskDetails)(role, existing.created_by_id === userId);
         const updates = { updated_at: new Date().toISOString() };
         if (req.body.status !== undefined) {
-            if (!["todo", "in_progress", "done"].includes(req.body.status) || (!canManage && existing.assignee_id !== userId)) {
+            if (!["todo", "in_progress", "done"].includes(req.body.status) || !(0, permissions_1.canUpdateTaskStatus)(role, existing.created_by_id === userId, existing.assignee_id === userId)) {
                 res.status(403).json({ error: "You cannot update this task status" });
                 return;
             }

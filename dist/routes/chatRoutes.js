@@ -11,6 +11,8 @@ const router = express_1.default.Router();
 router.use(authMiddleware_1.authMiddleware);
 router.get("/", chatController_1.getAllChats);
 router.get("/:chatId/stats", chatController_1.getChatStats);
+router.get("/:chatId/reads", chatController_1.getChatReadReceipts);
+router.post("/:chatId/read", chatController_1.markChatRead);
 router.post("/", chatController_1.createGroupChat);
 router.route("/rename").put(chatController_1.renameGroup);
 router.route("/groupremove").put(chatController_1.removeFromGroup);

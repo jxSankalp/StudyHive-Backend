@@ -5,6 +5,7 @@ const socket_io_1 = require("socket.io");
 const access_1 = require("./lib/access");
 const supabase_1 = require("./lib/supabase");
 const cors_1 = require("./lib/cors");
+const chatFiles_1 = require("./lib/chatFiles");
 let io;
 const onlineUsers = new Map();
 const addOnlineUser = (userId, socketId) => {
@@ -135,8 +136,10 @@ const initSocket = (server) => {
                     .maybeSingle();
                 if (error)
                     throw error;
-                if (message)
-                    socket.to(`chat:${chatId}`).emit("message received", message);
+                if (message) {
+                    const [hydrated] = await (0, chatFiles_1.withSignedChatFiles)([message]);
+                    socket.to(`chat:${chatId}`).emit("message received", hydrated);
+                }
             }
             catch (error) {
                 console.error("[socket] new message", error);

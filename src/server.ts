@@ -16,6 +16,7 @@ import whiteboardRoutes from "./routes/whiteboardRoutes";
 import calendarRoutes from "./routes/calendarRoutes";
 import taskRoutes from "./routes/taskRoutes";
 import notificationRoutes from "./routes/notificationRoutes";
+import fileRoutes from "./routes/fileRoutes";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import { corsOrigin, validateCorsConfiguration } from "./lib/cors";
@@ -65,6 +66,7 @@ app.use("/api/whiteboards", whiteboardRoutes);
 app.use("/api/calendar", calendarRoutes);
 app.use("/api/tasks", taskRoutes);
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/files", fileRoutes);
 
 // Health check
 app.get("/health", (_req: Request, res: Response): void => {

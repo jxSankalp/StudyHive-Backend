@@ -3,6 +3,7 @@ import type { Server as HTTPServer } from "http";
 import { getNoteChatId, getWhiteboardChatId, isChatMember } from "./lib/access";
 import { supabase } from "./lib/supabase";
 import { corsOrigin } from "./lib/cors";
+import { withSignedChatFiles } from "./lib/chatFiles";
 
 let io: Server;
 const onlineUsers = new Map<string, Set<string>>();
@@ -141,7 +142,10 @@ export const initSocket = (server: HTTPServer) => {
           .eq("sender_id", userId)
           .maybeSingle();
         if (error) throw error;
-        if (message) socket.to(`chat:${chatId}`).emit("message received", message);
+        if (message) {
+          const [hydrated] = await withSignedChatFiles([message as unknown as Record<string, unknown>]);
+          socket.to(`chat:${chatId}`).emit("message received", hydrated);
+        }
       } catch (error) {
         console.error("[socket] new message", error);
       }

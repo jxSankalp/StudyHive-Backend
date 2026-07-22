@@ -2,7 +2,8 @@
 import { Request, Response } from "express";
 import { supabase } from "../lib/supabase";
 import { getChatRole, isChatAdmin, isChatMember, isNonEmptyString } from "../lib/access";
-import { getOnlineUserCountByIds, revokeChatSocketAccess } from "../socket";
+import { broadcastToChat, getOnlineUserCountByIds, revokeChatSocketAccess } from "../socket";
+import { canChangeMemberRole, canManageWorkspace, canRemoveWorkspaceMember } from "../lib/permissions";
 
 const normalizeIds = (values: unknown): string[] => {
   if (!Array.isArray(values)) return [];
@@ -41,8 +42,15 @@ export const getAllChats = async (req: Request, res: Response): Promise<void> =>
       .in("id", chatIds)
       .order("updated_at", { ascending: false });
     if (error) throw error;
-
-    res.json({ chats: chats ?? [] });
+    const { data: unreadRows, error: unreadError } = await supabase.rpc("get_user_chat_unread_counts", { p_user_id: userId });
+    if (unreadError) throw unreadError;
+    type UnreadRow = { chat_id: string; unread_count: number | string; last_read_at: string | null };
+    const unreadByChat = new Map<string, UnreadRow>((unreadRows ?? []).map((row: UnreadRow) => [row.chat_id, row]));
+    const enriched = (chats ?? []).map((chat) => {
+      const unread = unreadByChat.get(chat.id);
+      return { ...chat, unread_count: Number(unread?.unread_count ?? 0), last_read_at: unread?.last_read_at ?? null };
+    });
+    res.json({ chats: enriched });
   } catch (error) {
     console.error("[getAllChats]", error);
     res.status(500).json({ error: "Failed to load workspaces" });
@@ -103,6 +111,9 @@ export const createGroupChat = async (req: Request, res: Response): Promise<void
     }));
     const { error: memberError } = await supabase.from("chat_members").insert(memberRows);
     if (memberError) throw memberError;
+    const readAt = new Date().toISOString();
+    const { error: readStateError } = await supabase.from("chat_read_state").insert(memberRows.map((member) => ({ chat_id: chat.id, user_id: member.user_id, last_read_at: readAt })));
+    if (readStateError) console.error("[createGroupChat] initial read state failed", readStateError);
 
     res.status(201).json({ group: chat });
   } catch (error) {
@@ -163,7 +174,7 @@ export const removeFromGroup = async (req: Request, res: Response): Promise<void
   let removedRole: "owner" | "admin" | "member" = "member";
   try {
     const actorRole = await getChatRole(chatId, actorId);
-    if (actorRole !== "owner" && actorRole !== "admin") {
+    if (!canManageWorkspace(actorRole)) {
       res.status(403).json({ error: "Only the workspace admin can remove members" });
       return;
     }
@@ -172,12 +183,8 @@ export const removeFromGroup = async (req: Request, res: Response): Promise<void
       res.status(404).json({ error: "Member not found" });
       return;
     }
-    if (targetId === actorId || targetRole === "owner") {
-      res.status(400).json({ error: "The workspace owner cannot be removed" });
-      return;
-    }
-    if (actorRole === "admin" && targetRole === "admin") {
-      res.status(403).json({ error: "Only the owner can remove another admin" });
+    if (!canRemoveWorkspaceMember(actorRole, targetRole, targetId === actorId)) {
+      res.status(403).json({ error: "You cannot remove this workspace member" });
       return;
     }
     removedRole = targetRole;
@@ -247,11 +254,20 @@ export const addToGroup = async (req: Request, res: Response): Promise<void> => 
       return;
     }
 
+    const { data: existingMembers, error: existingError } = await supabase.from("chat_members").select("user_id").eq("chat_id", chatId).in("user_id", userIds);
+    if (existingError) throw existingError;
+    const existingIds = new Set((existingMembers ?? []).map((member) => member.user_id));
+    const newUserIds = userIds.filter((userId) => !existingIds.has(userId));
     const rows = userIds.map((userId) => ({ chat_id: chatId, user_id: userId, role: "member" }));
     const { error } = await supabase
       .from("chat_members")
       .upsert(rows, { onConflict: "chat_id,user_id", ignoreDuplicates: true });
     if (error) throw error;
+    if (newUserIds.length > 0) {
+      const readAt = new Date().toISOString();
+      const { error: readStateError } = await supabase.from("chat_read_state").upsert(newUserIds.map((userId) => ({ chat_id: chatId, user_id: userId, last_read_at: readAt, updated_at: readAt })), { onConflict: "chat_id,user_id" });
+      if (readStateError) console.error("[addToGroup] initial read state failed", readStateError);
+    }
 
     const { data: chat, error: chatError } = await supabase
       .from("chats")
@@ -317,18 +333,65 @@ export const updateMemberRole = async (req: Request, res: Response): Promise<voi
   if (!actorId) { res.status(401).json({ error: "Unauthorized" }); return; }
   if (!chatId || !targetId || !role) { res.status(400).json({ error: "chatId, userId, and a valid role are required" }); return; }
   try {
-    if ((await getChatRole(chatId, actorId)) !== "owner") {
-      res.status(403).json({ error: "Only the workspace owner can manage admin roles" });
-      return;
-    }
+    const actorRole = await getChatRole(chatId, actorId);
     const targetRole = await getChatRole(chatId, targetId);
     if (!targetRole) { res.status(404).json({ error: "Member not found" }); return; }
-    if (targetRole === "owner") { res.status(400).json({ error: "The owner role cannot be changed" }); return; }
+    if (!canChangeMemberRole(actorRole, targetRole)) { res.status(403).json({ error: "Only the owner can change a non-owner member role" }); return; }
     const { data, error } = await supabase.from("chat_members").update({ role }).eq("chat_id", chatId).eq("user_id", targetId).select("user_id, role").single();
     if (error) throw error;
     res.json({ member: data });
   } catch (error) {
     console.error("[updateMemberRole]", error);
     res.status(500).json({ error: "Failed to update member role" });
+  }
+};
+
+export const getChatReadReceipts = async (req: Request, res: Response): Promise<void> => {
+  const userId = req.user?.userId;
+  const { chatId } = req.params;
+  if (!userId) { res.status(401).json({ error: "Unauthorized" }); return; }
+  try {
+    if (!(await isChatMember(chatId, userId))) { res.status(403).json({ error: "Access denied" }); return; }
+    const { data, error } = await supabase.from("chat_read_state")
+      .select("user_id, last_read_at, last_read_message_id, updated_at, profile:profiles!chat_read_state_user_id_fkey ( id, username, photo )")
+      .eq("chat_id", chatId);
+    if (error) throw error;
+    res.json({ receipts: data ?? [] });
+  } catch (error) {
+    console.error("[getChatReadReceipts]", error);
+    res.status(500).json({ error: "Failed to load read receipts" });
+  }
+};
+
+export const markChatRead = async (req: Request, res: Response): Promise<void> => {
+  const userId = req.user?.userId;
+  const { chatId } = req.params;
+  const messageId = typeof req.body.messageId === "string" && req.body.messageId ? req.body.messageId : null;
+  if (!userId) { res.status(401).json({ error: "Unauthorized" }); return; }
+  try {
+    if (!(await isChatMember(chatId, userId))) { res.status(403).json({ error: "Access denied" }); return; }
+    const { data, error } = await supabase.rpc("mark_chat_read", {
+      p_chat_id: chatId,
+      p_user_id: userId,
+      p_message_id: messageId,
+    });
+    if (error) {
+      if (error.code === "22023") { res.status(400).json({ error: "Message is not in this workspace" }); return; }
+      throw error;
+    }
+    const state = Array.isArray(data) ? data[0] : data;
+    if (!state) throw new Error("Read state was not returned");
+    const payload = {
+      chatId,
+      userId,
+      lastReadAt: state.last_read_at,
+      lastReadMessageId: state.last_read_message_id,
+      updatedAt: state.updated_at,
+    };
+    broadcastToChat(chatId, "chat read", payload);
+    res.json({ receipt: payload });
+  } catch (error) {
+    console.error("[markChatRead]", error);
+    res.status(500).json({ error: "Failed to update read receipt" });
   }
 };

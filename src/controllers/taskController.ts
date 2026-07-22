@@ -3,6 +3,7 @@ import type { Request, Response } from "express";
 import { getChatRole, isChatMember } from "../lib/access";
 import { supabase } from "../lib/supabase";
 import { notifyUsers } from "../socket";
+import { canEditTaskDetails, canUpdateTaskStatus } from "../lib/permissions";
 
 const TASK_SELECT = `id, chat_id, title, description, status, priority, due_at, assignee_id, created_by_id, completed_at, created_at, updated_at,
   assignee:profiles!tasks_assignee_id_fkey ( id, username, email, photo ),
@@ -82,10 +83,10 @@ export const updateTask = async (req: Request, res: Response): Promise<void> => 
     if (!existing) { res.status(404).json({ error: "Task not found" }); return; }
     const role = await getChatRole(existing.chat_id, userId);
     if (!role) { res.status(403).json({ error: "Access denied" }); return; }
-    const canManage = role === "owner" || role === "admin" || existing.created_by_id === userId;
+    const canManage = canEditTaskDetails(role, existing.created_by_id === userId);
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (req.body.status !== undefined) {
-      if (!["todo", "in_progress", "done"].includes(req.body.status) || (!canManage && existing.assignee_id !== userId)) { res.status(403).json({ error: "You cannot update this task status" }); return; }
+      if (!["todo", "in_progress", "done"].includes(req.body.status) || !canUpdateTaskStatus(role, existing.created_by_id === userId, existing.assignee_id === userId)) { res.status(403).json({ error: "You cannot update this task status" }); return; }
       updates.status = req.body.status;
       updates.completed_at = req.body.status === "done" ? new Date().toISOString() : null;
     }
