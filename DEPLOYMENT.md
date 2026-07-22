@@ -18,7 +18,7 @@ Apply every SQL file in `supabase/migrations` in numeric order. Migration `005_s
 - creates monotonic chat read state and unread-count/read-watermark functions;
 - adds the compound message-pagination index.
 
-Do not deploy the new backend before migration 005: workspace listing calls the unread-count function and will fail until it exists. Apply migrations to staging first, then run authenticated/non-member policy smoke tests before production.
+Do not deploy the new backend before migration 005: workspace listing calls the unread-count function and will fail until it exists. Migration 006 repairs older databases where `reply_to_id` exists without its self-referencing foreign key and refreshes PostgREST's schema cache. Apply migrations to staging first, then run authenticated/non-member policy smoke tests before production.
 
 ## Render configuration
 

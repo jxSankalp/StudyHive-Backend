@@ -6,11 +6,8 @@ const supabase_1 = require("../lib/supabase");
 const socket_1 = require("../socket");
 const permissions_1 = require("../lib/permissions");
 const chatFiles_1 = require("../lib/chatFiles");
+const chatMessages_1 = require("../lib/chatMessages");
 const messageCursor_1 = require("../lib/messageCursor");
-const MESSAGE_SELECT = `id, content, created_at, edited_at, deleted_at, chat_id, reply_to_id,
-  sender:profiles!messages_sender_id_fkey ( id, username, email, photo ),
-  reply_to:messages!messages_reply_to_id_fkey ( id, content, deleted_at, sender:profiles!messages_sender_id_fkey ( id, username ) ),
-  reactions:message_reactions ( emoji, user_id )`;
 const allMessages = async (req, res) => {
     const userId = req.user?.userId;
     const { chatId } = req.params;
@@ -32,7 +29,7 @@ const allMessages = async (req, res) => {
         }
         let query = supabase_1.supabase
             .from("messages")
-            .select(MESSAGE_SELECT)
+            .select(chatMessages_1.MESSAGE_SELECT)
             .eq("chat_id", chatId)
             .order("created_at", { ascending: false })
             .order("id", { ascending: false })
@@ -47,7 +44,7 @@ const allMessages = async (req, res) => {
         const hasMore = rows.length > limit;
         const pageNewestFirst = rows.slice(0, limit);
         const oldest = pageNewestFirst.at(-1);
-        const messages = await (0, chatFiles_1.withSignedChatFiles)(pageNewestFirst.reverse());
+        const messages = await (0, chatMessages_1.hydrateChatMessages)(pageNewestFirst.reverse());
         res.json({
             messages,
             hasMore,
@@ -118,7 +115,7 @@ const sendMessage = async (req, res) => {
         const { data: message, error } = await supabase_1.supabase
             .from("messages")
             .insert({ sender_id: userId, content, chat_id: chatId, reply_to_id: replyToId })
-            .select(MESSAGE_SELECT)
+            .select(chatMessages_1.MESSAGE_SELECT)
             .single();
         if (error)
             throw error;
@@ -151,7 +148,7 @@ const sendMessage = async (req, res) => {
             .eq("id", chatId);
         if (chatError)
             console.error("[sendMessage] latest message update failed", chatError);
-        const [hydrated] = await (0, chatFiles_1.withSignedChatFiles)([message]);
+        const [hydrated] = await (0, chatMessages_1.hydrateChatMessages)([message]);
         res.status(201).json(hydrated);
     }
     catch (error) {
@@ -187,10 +184,10 @@ const updateMessage = async (req, res) => {
             res.status(403).json({ error: "Access denied" });
             return;
         }
-        const { data, error } = await supabase_1.supabase.from("messages").update({ content, edited_at: new Date().toISOString() }).eq("id", existing.id).select(MESSAGE_SELECT).single();
+        const { data, error } = await supabase_1.supabase.from("messages").update({ content, edited_at: new Date().toISOString() }).eq("id", existing.id).select(chatMessages_1.MESSAGE_SELECT).single();
         if (error)
             throw error;
-        const [hydrated] = await (0, chatFiles_1.withSignedChatFiles)([data]);
+        const [hydrated] = await (0, chatMessages_1.hydrateChatMessages)([data]);
         (0, socket_1.broadcastToChat)(existing.chat_id, "message updated", hydrated);
         res.json(hydrated);
     }

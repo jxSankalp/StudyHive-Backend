@@ -5,7 +5,7 @@ const socket_io_1 = require("socket.io");
 const access_1 = require("./lib/access");
 const supabase_1 = require("./lib/supabase");
 const cors_1 = require("./lib/cors");
-const chatFiles_1 = require("./lib/chatFiles");
+const chatMessages_1 = require("./lib/chatMessages");
 let io;
 const onlineUsers = new Map();
 const addOnlineUser = (userId, socketId) => {
@@ -126,10 +126,7 @@ const initSocket = (server) => {
                 // so a member cannot spoof a sender, message id, or HTML payload over the socket.
                 const { data: message, error } = await supabase_1.supabase
                     .from("messages")
-                    .select(`id, content, created_at, edited_at, deleted_at, chat_id, reply_to_id,
-            sender:profiles!messages_sender_id_fkey ( id, username, email, photo ),
-            reply_to:messages!messages_reply_to_id_fkey ( id, content, deleted_at, sender:profiles!messages_sender_id_fkey ( id, username ) ),
-            reactions:message_reactions ( emoji, user_id )`)
+                    .select(chatMessages_1.MESSAGE_SELECT)
                     .eq("id", messageId)
                     .eq("chat_id", chatId)
                     .eq("sender_id", userId)
@@ -137,7 +134,7 @@ const initSocket = (server) => {
                 if (error)
                     throw error;
                 if (message) {
-                    const [hydrated] = await (0, chatFiles_1.withSignedChatFiles)([message]);
+                    const [hydrated] = await (0, chatMessages_1.hydrateChatMessages)([message]);
                     socket.to(`chat:${chatId}`).emit("message received", hydrated);
                 }
             }

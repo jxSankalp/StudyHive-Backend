@@ -4,13 +4,9 @@ import { getChatRole, isChatMember } from "../lib/access";
 import { supabase } from "../lib/supabase";
 import { broadcastToChat } from "../socket";
 import { canDeleteMessage as mayDeleteMessage } from "../lib/permissions";
-import { CHAT_FILES_BUCKET, MAX_CHAT_FILES_PER_MESSAGE, withSignedChatFiles } from "../lib/chatFiles";
+import { CHAT_FILES_BUCKET, MAX_CHAT_FILES_PER_MESSAGE } from "../lib/chatFiles";
+import { hydrateChatMessages, MESSAGE_SELECT } from "../lib/chatMessages";
 import { decodeMessageCursor, encodeMessageCursor, parseMessageLimit } from "../lib/messageCursor";
-
-const MESSAGE_SELECT = `id, content, created_at, edited_at, deleted_at, chat_id, reply_to_id,
-  sender:profiles!messages_sender_id_fkey ( id, username, email, photo ),
-  reply_to:messages!messages_reply_to_id_fkey ( id, content, deleted_at, sender:profiles!messages_sender_id_fkey ( id, username ) ),
-  reactions:message_reactions ( emoji, user_id )`;
 
 export const allMessages = async (req: Request, res: Response): Promise<void> => {
   const userId = req.user?.userId;
@@ -48,7 +44,7 @@ export const allMessages = async (req: Request, res: Response): Promise<void> =>
     const hasMore = rows.length > limit;
     const pageNewestFirst = rows.slice(0, limit);
     const oldest = pageNewestFirst.at(-1);
-    const messages = await withSignedChatFiles(pageNewestFirst.reverse());
+    const messages = await hydrateChatMessages(pageNewestFirst.reverse());
     res.json({
       messages,
       hasMore,
@@ -144,7 +140,7 @@ export const sendMessage = async (req: Request, res: Response): Promise<void> =>
       .eq("id", chatId);
     if (chatError) console.error("[sendMessage] latest message update failed", chatError);
 
-    const [hydrated] = await withSignedChatFiles([message as unknown as Record<string, unknown>]);
+    const [hydrated] = await hydrateChatMessages([message as unknown as Record<string, unknown>]);
     res.status(201).json(hydrated);
   } catch (error) {
     console.error("[sendMessage]", error);
@@ -165,7 +161,7 @@ export const updateMessage = async (req: Request, res: Response): Promise<void> 
     if (!(await isChatMember(existing.chat_id, userId))) { res.status(403).json({ error: "Access denied" }); return; }
     const { data, error } = await supabase.from("messages").update({ content, edited_at: new Date().toISOString() }).eq("id", existing.id).select(MESSAGE_SELECT).single();
     if (error) throw error;
-    const [hydrated] = await withSignedChatFiles([data as unknown as Record<string, unknown>]);
+    const [hydrated] = await hydrateChatMessages([data as unknown as Record<string, unknown>]);
     broadcastToChat(existing.chat_id, "message updated", hydrated);
     res.json(hydrated);
   } catch (error) { console.error("[updateMessage]", error); res.status(500).json({ error: "Failed to update message" }); }

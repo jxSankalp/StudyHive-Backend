@@ -3,7 +3,7 @@ import type { Server as HTTPServer } from "http";
 import { getNoteChatId, getWhiteboardChatId, isChatMember } from "./lib/access";
 import { supabase } from "./lib/supabase";
 import { corsOrigin } from "./lib/cors";
-import { withSignedChatFiles } from "./lib/chatFiles";
+import { hydrateChatMessages, MESSAGE_SELECT } from "./lib/chatMessages";
 
 let io: Server;
 const onlineUsers = new Map<string, Set<string>>();
@@ -133,17 +133,14 @@ export const initSocket = (server: HTTPServer) => {
         // so a member cannot spoof a sender, message id, or HTML payload over the socket.
         const { data: message, error } = await supabase
           .from("messages")
-          .select(`id, content, created_at, edited_at, deleted_at, chat_id, reply_to_id,
-            sender:profiles!messages_sender_id_fkey ( id, username, email, photo ),
-            reply_to:messages!messages_reply_to_id_fkey ( id, content, deleted_at, sender:profiles!messages_sender_id_fkey ( id, username ) ),
-            reactions:message_reactions ( emoji, user_id )`)
+          .select(MESSAGE_SELECT)
           .eq("id", messageId)
           .eq("chat_id", chatId)
           .eq("sender_id", userId)
           .maybeSingle();
         if (error) throw error;
         if (message) {
-          const [hydrated] = await withSignedChatFiles([message as unknown as Record<string, unknown>]);
+          const [hydrated] = await hydrateChatMessages([message as unknown as Record<string, unknown>]);
           socket.to(`chat:${chatId}`).emit("message received", hydrated);
         }
       } catch (error) {
