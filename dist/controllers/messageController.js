@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.toggleReaction = exports.deleteMessage = exports.updateMessage = exports.sendMessage = exports.allMessages = void 0;
+exports.toggleReaction = exports.deleteMessage = exports.getMessageById = exports.updateMessage = exports.sendMessage = exports.allMessages = void 0;
 const access_1 = require("../lib/access");
 const supabase_1 = require("../lib/supabase");
 const socket_1 = require("../socket");
@@ -8,6 +8,7 @@ const permissions_1 = require("../lib/permissions");
 const chatFiles_1 = require("../lib/chatFiles");
 const chatMessages_1 = require("../lib/chatMessages");
 const messageCursor_1 = require("../lib/messageCursor");
+const messageMentions_1 = require("../lib/messageMentions");
 const allMessages = async (req, res) => {
     const userId = req.user?.userId;
     const { chatId } = req.params;
@@ -67,12 +68,22 @@ const sendMessage = async (req, res) => {
     const attachmentIds = Array.isArray(req.body.attachmentIds)
         ? Array.from(new Set(req.body.attachmentIds.filter((id) => typeof id === "string" && id.length > 0)))
         : [];
+    const mentionedUserIds = (0, messageMentions_1.normalizeMentionIds)(req.body.mentionedUserIds);
+    const clientMessageId = typeof req.body.clientMessageId === "string" ? req.body.clientMessageId : "";
     if (!userId) {
         res.status(401).json({ error: "Unauthorized" });
         return;
     }
     if (!chatId || (!content && attachmentIds.length === 0)) {
         res.status(400).json({ error: "A message or attachment and chatId are required" });
+        return;
+    }
+    if (mentionedUserIds === null) {
+        res.status(400).json({ error: "mentionedUserIds must contain at most 25 user IDs" });
+        return;
+    }
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientMessageId)) {
+        res.status(400).json({ error: "A valid clientMessageId is required" });
         return;
     }
     if (attachmentIds.length > chatFiles_1.MAX_CHAT_FILES_PER_MESSAGE) {
@@ -86,6 +97,23 @@ const sendMessage = async (req, res) => {
     try {
         if (!(await (0, access_1.isChatMember)(chatId, userId))) {
             res.status(403).json({ error: "You are not a member of this workspace" });
+            return;
+        }
+        await (0, messageMentions_1.validateMentionMembers)(chatId, mentionedUserIds, content);
+        const { data: duplicate, error: duplicateError } = await supabase_1.supabase.from("messages")
+            .select(chatMessages_1.MESSAGE_SELECT)
+            .eq("sender_id", userId)
+            .eq("client_message_id", clientMessageId)
+            .maybeSingle();
+        if (duplicateError)
+            throw duplicateError;
+        if (duplicate) {
+            if (duplicate.chat_id !== chatId) {
+                res.status(409).json({ error: "clientMessageId was already used" });
+                return;
+            }
+            const [hydratedDuplicate] = await (0, chatMessages_1.hydrateChatMessages)([duplicate]);
+            res.status(200).json(hydratedDuplicate);
             return;
         }
         if (replyToId) {
@@ -112,13 +140,25 @@ const sendMessage = async (req, res) => {
                 return;
             }
         }
-        const { data: message, error } = await supabase_1.supabase
+        let { data: message, error } = await supabase_1.supabase
             .from("messages")
-            .insert({ sender_id: userId, content, chat_id: chatId, reply_to_id: replyToId })
+            .insert({ sender_id: userId, content, chat_id: chatId, reply_to_id: replyToId, client_message_id: clientMessageId })
             .select(chatMessages_1.MESSAGE_SELECT)
             .single();
-        if (error)
-            throw error;
+        if (error?.code === "23505") {
+            const retry = await supabase_1.supabase.from("messages").select(chatMessages_1.MESSAGE_SELECT).eq("sender_id", userId).eq("client_message_id", clientMessageId).maybeSingle();
+            if (retry.error)
+                throw retry.error;
+            if (!retry.data || retry.data.chat_id !== chatId) {
+                res.status(409).json({ error: "clientMessageId was already used" });
+                return;
+            }
+            const [hydratedRetry] = await (0, chatMessages_1.hydrateChatMessages)([retry.data]);
+            res.status(200).json(hydratedRetry);
+            return;
+        }
+        if (error || !message)
+            throw error ?? new Error("Message insert returned no row");
         if (attachmentIds.length > 0) {
             const { data: linked, error: linkError } = await supabase_1.supabase.from("chat_files")
                 .update({ message_id: message.id, updated_at: new Date().toISOString() })
@@ -148,10 +188,30 @@ const sendMessage = async (req, res) => {
             .eq("id", chatId);
         if (chatError)
             console.error("[sendMessage] latest message update failed", chatError);
-        const [hydrated] = await (0, chatMessages_1.hydrateChatMessages)([message]);
+        const sender = message.sender;
+        await (0, messageMentions_1.syncMessageMentions)({
+            messageId: message.id,
+            chatId,
+            senderId: userId,
+            senderName: sender?.username || "A workspace member",
+            content,
+            mentionIds: mentionedUserIds,
+        });
+        const { data: completedMessage, error: completedError } = await supabase_1.supabase
+            .from("messages")
+            .select(chatMessages_1.MESSAGE_SELECT)
+            .eq("id", message.id)
+            .single();
+        if (completedError)
+            throw completedError;
+        const [hydrated] = await (0, chatMessages_1.hydrateChatMessages)([completedMessage]);
         res.status(201).json(hydrated);
     }
     catch (error) {
+        if (error instanceof messageMentions_1.InvalidMentionError) {
+            res.status(400).json({ error: error.message });
+            return;
+        }
         console.error("[sendMessage]", error);
         res.status(500).json({ error: "Failed to send message" });
     }
@@ -160,12 +220,17 @@ exports.sendMessage = sendMessage;
 const updateMessage = async (req, res) => {
     const userId = req.user?.userId;
     const content = typeof req.body.content === "string" ? req.body.content.trim() : "";
+    const mentionedUserIds = (0, messageMentions_1.normalizeMentionIds)(req.body.mentionedUserIds);
     if (!userId) {
         res.status(401).json({ error: "Unauthorized" });
         return;
     }
     if (!content || content.length > 10000) {
         res.status(400).json({ error: "Message must be between 1 and 10,000 characters" });
+        return;
+    }
+    if (mentionedUserIds === null) {
+        res.status(400).json({ error: "mentionedUserIds must contain at most 25 user IDs" });
         return;
     }
     try {
@@ -184,19 +249,57 @@ const updateMessage = async (req, res) => {
             res.status(403).json({ error: "Access denied" });
             return;
         }
+        await (0, messageMentions_1.validateMentionMembers)(existing.chat_id, mentionedUserIds, content);
         const { data, error } = await supabase_1.supabase.from("messages").update({ content, edited_at: new Date().toISOString() }).eq("id", existing.id).select(chatMessages_1.MESSAGE_SELECT).single();
         if (error)
             throw error;
-        const [hydrated] = await (0, chatMessages_1.hydrateChatMessages)([data]);
+        const sender = data.sender;
+        await (0, messageMentions_1.syncMessageMentions)({ messageId: existing.id, chatId: existing.chat_id, senderId: userId, senderName: sender?.username || "A workspace member", content, mentionIds: mentionedUserIds });
+        const { data: completedMessage, error: completedError } = await supabase_1.supabase.from("messages").select(chatMessages_1.MESSAGE_SELECT).eq("id", existing.id).single();
+        if (completedError)
+            throw completedError;
+        const [hydrated] = await (0, chatMessages_1.hydrateChatMessages)([completedMessage]);
         (0, socket_1.broadcastToChat)(existing.chat_id, "message updated", hydrated);
         res.json(hydrated);
     }
     catch (error) {
+        if (error instanceof messageMentions_1.InvalidMentionError) {
+            res.status(400).json({ error: error.message });
+            return;
+        }
         console.error("[updateMessage]", error);
         res.status(500).json({ error: "Failed to update message" });
     }
 };
 exports.updateMessage = updateMessage;
+const getMessageById = async (req, res) => {
+    const userId = req.user?.userId;
+    const { chatId, messageId } = req.params;
+    if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+    }
+    try {
+        if (!(await (0, access_1.isChatMember)(chatId, userId))) {
+            res.status(403).json({ error: "Access denied" });
+            return;
+        }
+        const { data, error } = await supabase_1.supabase.from("messages").select(chatMessages_1.MESSAGE_SELECT).eq("id", messageId).eq("chat_id", chatId).maybeSingle();
+        if (error)
+            throw error;
+        if (!data) {
+            res.status(404).json({ error: "Message not found" });
+            return;
+        }
+        const [message] = await (0, chatMessages_1.hydrateChatMessages)([data]);
+        res.json({ message });
+    }
+    catch (error) {
+        console.error("[getMessageById]", error);
+        res.status(500).json({ error: "Failed to load message" });
+    }
+};
+exports.getMessageById = getMessageById;
 const deleteMessage = async (req, res) => {
     const userId = req.user?.userId;
     if (!userId) {

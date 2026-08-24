@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.authMiddleware = void 0;
 const supabase_1 = require("../lib/supabase");
+const telemetry_1 = require("../lib/telemetry");
 const authMiddleware = async (req, res, next) => {
     try {
         // Accept Bearer token from Authorization header OR cookie
@@ -23,10 +24,11 @@ const authMiddleware = async (req, res, next) => {
             return;
         }
         req.user = { userId: data.user.id };
+        (0, telemetry_1.setRequestUser)(data.user.id);
         next();
     }
     catch (error) {
-        console.error("Auth middleware error:", error);
+        (0, telemetry_1.logError)("auth.middleware.failed", error);
         res.status(503).json({ message: "Authentication service unavailable" });
     }
 };

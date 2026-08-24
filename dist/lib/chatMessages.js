@@ -3,9 +3,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.hydrateChatMessages = exports.MESSAGE_SELECT = void 0;
 const chatFiles_1 = require("./chatFiles");
 const supabase_1 = require("./supabase");
-exports.MESSAGE_SELECT = `id, content, created_at, edited_at, deleted_at, chat_id, reply_to_id,
+exports.MESSAGE_SELECT = `id, content, created_at, edited_at, deleted_at, chat_id, reply_to_id, client_message_id,
   sender:profiles!messages_sender_id_fkey ( id, username, email, photo ),
-  reactions:message_reactions ( emoji, user_id )`;
+  reactions:message_reactions ( emoji, user_id ),
+  mentions:message_mentions ( user_id, profile:profiles!message_mentions_user_id_fkey ( id, username ) )`;
 /**
  * Loads self-referencing replies separately instead of relying on PostgREST's
  * schema-cache relationship discovery. This keeps chat readable on databases

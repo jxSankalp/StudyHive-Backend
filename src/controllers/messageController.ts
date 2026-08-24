@@ -7,6 +7,7 @@ import { canDeleteMessage as mayDeleteMessage } from "../lib/permissions";
 import { CHAT_FILES_BUCKET, MAX_CHAT_FILES_PER_MESSAGE } from "../lib/chatFiles";
 import { hydrateChatMessages, MESSAGE_SELECT } from "../lib/chatMessages";
 import { decodeMessageCursor, encodeMessageCursor, parseMessageLimit } from "../lib/messageCursor";
+import { InvalidMentionError, normalizeMentionIds, syncMessageMentions, validateMentionMembers } from "../lib/messageMentions";
 
 export const allMessages = async (req: Request, res: Response): Promise<void> => {
   const userId = req.user?.userId;
@@ -66,12 +67,22 @@ export const sendMessage = async (req: Request, res: Response): Promise<void> =>
   const attachmentIds = Array.isArray(req.body.attachmentIds)
     ? Array.from(new Set(req.body.attachmentIds.filter((id: unknown): id is string => typeof id === "string" && id.length > 0)))
     : [];
+  const mentionedUserIds = normalizeMentionIds(req.body.mentionedUserIds);
+  const clientMessageId = typeof req.body.clientMessageId === "string" ? req.body.clientMessageId : "";
   if (!userId) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
   if (!chatId || (!content && attachmentIds.length === 0)) {
     res.status(400).json({ error: "A message or attachment and chatId are required" });
+    return;
+  }
+  if (mentionedUserIds === null) {
+    res.status(400).json({ error: "mentionedUserIds must contain at most 25 user IDs" });
+    return;
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientMessageId)) {
+    res.status(400).json({ error: "A valid clientMessageId is required" });
     return;
   }
   if (attachmentIds.length > MAX_CHAT_FILES_PER_MESSAGE) {
@@ -86,6 +97,19 @@ export const sendMessage = async (req: Request, res: Response): Promise<void> =>
   try {
     if (!(await isChatMember(chatId, userId))) {
       res.status(403).json({ error: "You are not a member of this workspace" });
+      return;
+    }
+    await validateMentionMembers(chatId, mentionedUserIds, content);
+    const { data: duplicate, error: duplicateError } = await supabase.from("messages")
+      .select(MESSAGE_SELECT)
+      .eq("sender_id", userId)
+      .eq("client_message_id", clientMessageId)
+      .maybeSingle();
+    if (duplicateError) throw duplicateError;
+    if (duplicate) {
+      if (duplicate.chat_id !== chatId) { res.status(409).json({ error: "clientMessageId was already used" }); return; }
+      const [hydratedDuplicate] = await hydrateChatMessages([duplicate as unknown as Record<string, unknown>]);
+      res.status(200).json(hydratedDuplicate);
       return;
     }
     if (replyToId) {
@@ -106,12 +130,20 @@ export const sendMessage = async (req: Request, res: Response): Promise<void> =>
         res.status(400).json({ error: "One or more attachments are invalid, incomplete, or already sent" }); return;
       }
     }
-    const { data: message, error } = await supabase
+    let { data: message, error } = await supabase
       .from("messages")
-      .insert({ sender_id: userId, content, chat_id: chatId, reply_to_id: replyToId })
+      .insert({ sender_id: userId, content, chat_id: chatId, reply_to_id: replyToId, client_message_id: clientMessageId })
       .select(MESSAGE_SELECT)
       .single();
-    if (error) throw error;
+    if (error?.code === "23505") {
+      const retry = await supabase.from("messages").select(MESSAGE_SELECT).eq("sender_id", userId).eq("client_message_id", clientMessageId).maybeSingle();
+      if (retry.error) throw retry.error;
+      if (!retry.data || retry.data.chat_id !== chatId) { res.status(409).json({ error: "clientMessageId was already used" }); return; }
+      const [hydratedRetry] = await hydrateChatMessages([retry.data as unknown as Record<string, unknown>]);
+      res.status(200).json(hydratedRetry);
+      return;
+    }
+    if (error || !message) throw error ?? new Error("Message insert returned no row");
 
     if (attachmentIds.length > 0) {
       const { data: linked, error: linkError } = await supabase.from("chat_files")
@@ -140,9 +172,28 @@ export const sendMessage = async (req: Request, res: Response): Promise<void> =>
       .eq("id", chatId);
     if (chatError) console.error("[sendMessage] latest message update failed", chatError);
 
-    const [hydrated] = await hydrateChatMessages([message as unknown as Record<string, unknown>]);
+    const sender = message.sender as unknown as { username?: string } | null;
+    await syncMessageMentions({
+      messageId: message.id,
+      chatId,
+      senderId: userId,
+      senderName: sender?.username || "A workspace member",
+      content,
+      mentionIds: mentionedUserIds,
+    });
+    const { data: completedMessage, error: completedError } = await supabase
+      .from("messages")
+      .select(MESSAGE_SELECT)
+      .eq("id", message.id)
+      .single();
+    if (completedError) throw completedError;
+    const [hydrated] = await hydrateChatMessages([completedMessage as unknown as Record<string, unknown>]);
     res.status(201).json(hydrated);
   } catch (error) {
+    if (error instanceof InvalidMentionError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
     console.error("[sendMessage]", error);
     res.status(500).json({ error: "Failed to send message" });
   }
@@ -151,20 +202,47 @@ export const sendMessage = async (req: Request, res: Response): Promise<void> =>
 export const updateMessage = async (req: Request, res: Response): Promise<void> => {
   const userId = req.user?.userId;
   const content = typeof req.body.content === "string" ? req.body.content.trim() : "";
+  const mentionedUserIds = normalizeMentionIds(req.body.mentionedUserIds);
   if (!userId) { res.status(401).json({ error: "Unauthorized" }); return; }
   if (!content || content.length > 10_000) { res.status(400).json({ error: "Message must be between 1 and 10,000 characters" }); return; }
+  if (mentionedUserIds === null) { res.status(400).json({ error: "mentionedUserIds must contain at most 25 user IDs" }); return; }
   try {
     const { data: existing, error: findError } = await supabase.from("messages").select("id, chat_id, sender_id, deleted_at").eq("id", req.params.messageId).maybeSingle();
     if (findError) throw findError;
     if (!existing) { res.status(404).json({ error: "Message not found" }); return; }
     if (existing.sender_id !== userId || existing.deleted_at) { res.status(403).json({ error: "Only the sender can edit this message" }); return; }
     if (!(await isChatMember(existing.chat_id, userId))) { res.status(403).json({ error: "Access denied" }); return; }
+    await validateMentionMembers(existing.chat_id, mentionedUserIds, content);
     const { data, error } = await supabase.from("messages").update({ content, edited_at: new Date().toISOString() }).eq("id", existing.id).select(MESSAGE_SELECT).single();
     if (error) throw error;
-    const [hydrated] = await hydrateChatMessages([data as unknown as Record<string, unknown>]);
+    const sender = data.sender as unknown as { username?: string } | null;
+    await syncMessageMentions({ messageId: existing.id, chatId: existing.chat_id, senderId: userId, senderName: sender?.username || "A workspace member", content, mentionIds: mentionedUserIds });
+    const { data: completedMessage, error: completedError } = await supabase.from("messages").select(MESSAGE_SELECT).eq("id", existing.id).single();
+    if (completedError) throw completedError;
+    const [hydrated] = await hydrateChatMessages([completedMessage as unknown as Record<string, unknown>]);
     broadcastToChat(existing.chat_id, "message updated", hydrated);
     res.json(hydrated);
-  } catch (error) { console.error("[updateMessage]", error); res.status(500).json({ error: "Failed to update message" }); }
+  } catch (error) {
+    if (error instanceof InvalidMentionError) { res.status(400).json({ error: error.message }); return; }
+    console.error("[updateMessage]", error); res.status(500).json({ error: "Failed to update message" });
+  }
+};
+
+export const getMessageById = async (req: Request, res: Response): Promise<void> => {
+  const userId = req.user?.userId;
+  const { chatId, messageId } = req.params;
+  if (!userId) { res.status(401).json({ error: "Unauthorized" }); return; }
+  try {
+    if (!(await isChatMember(chatId, userId))) { res.status(403).json({ error: "Access denied" }); return; }
+    const { data, error } = await supabase.from("messages").select(MESSAGE_SELECT).eq("id", messageId).eq("chat_id", chatId).maybeSingle();
+    if (error) throw error;
+    if (!data) { res.status(404).json({ error: "Message not found" }); return; }
+    const [message] = await hydrateChatMessages([data as unknown as Record<string, unknown>]);
+    res.json({ message });
+  } catch (error) {
+    console.error("[getMessageById]", error);
+    res.status(500).json({ error: "Failed to load message" });
+  }
 };
 
 export const deleteMessage = async (req: Request, res: Response): Promise<void> => {

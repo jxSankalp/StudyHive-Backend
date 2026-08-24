@@ -10,6 +10,7 @@ const router = express_1.default.Router();
 // Protect all routes
 router.use(authMiddleware_1.authMiddleware);
 router.route("/:chatId").get(messageController_1.allMessages);
+router.get("/:chatId/:messageId", messageController_1.getMessageById);
 router.route("/").post(messageController_1.sendMessage);
 router.patch("/:messageId", messageController_1.updateMessage);
 router.delete("/:messageId", messageController_1.deleteMessage);

@@ -1,6 +1,7 @@
 /// <reference path="../types/index.d.ts" />
 import { Request, Response, NextFunction } from "express";
 import { supabase } from "../lib/supabase";
+import { logError, setRequestUser } from "../lib/telemetry";
 
 export const authMiddleware = async (
   req: Request,
@@ -32,9 +33,10 @@ export const authMiddleware = async (
     }
 
     req.user = { userId: data.user.id };
+    setRequestUser(data.user.id);
     next();
   } catch (error) {
-    console.error("Auth middleware error:", error);
+    logError("auth.middleware.failed", error);
     res.status(503).json({ message: "Authentication service unavailable" });
   }
 };

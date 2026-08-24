@@ -6,6 +6,7 @@ const access_1 = require("./lib/access");
 const supabase_1 = require("./lib/supabase");
 const cors_1 = require("./lib/cors");
 const chatMessages_1 = require("./lib/chatMessages");
+const telemetry_1 = require("./lib/telemetry");
 let io;
 const onlineUsers = new Map();
 const addOnlineUser = (userId, socketId) => {
@@ -67,6 +68,38 @@ const serializedSize = (value) => {
         return Number.POSITIVE_INFINITY;
     }
 };
+const isRecord = (value) => typeof value === "object" && value !== null;
+const validWhiteboardShape = (value) => {
+    if (!isRecord(value) || !isRecord(value.attrs))
+        return false;
+    const attrs = value.attrs;
+    return typeof attrs.shapeId === "string" && attrs.shapeId.length > 0 && attrs.shapeId.length <= 100
+        && ["pen", "eraser", "text", "rectangle", "circle"].includes(String(attrs.tool))
+        && typeof attrs.x === "number" && Number.isFinite(attrs.x)
+        && typeof attrs.y === "number" && Number.isFinite(attrs.y)
+        && (!Array.isArray(attrs.points) || (attrs.points.length <= 20000 && attrs.points.every((point) => typeof point === "number" && Number.isFinite(point))));
+};
+const validWhiteboardDelta = (value) => {
+    if (!isRecord(value) || typeof value.op !== "string")
+        return false;
+    if (value.op === "shape:add")
+        return validWhiteboardShape(value.shape);
+    if (value.op === "shape:patch") {
+        const allowedAttrs = new Set(["width", "height", "radius"]);
+        return typeof value.shapeId === "string" && value.shapeId.length <= 100 && isRecord(value.attrs)
+            && Object.entries(value.attrs).every(([key, candidate]) => allowedAttrs.has(key) && typeof candidate === "number" && Number.isFinite(candidate))
+            && (!Array.isArray(value.appendPoints) || (value.appendPoints.length <= 128 && value.appendPoints.every((point) => typeof point === "number" && Number.isFinite(point))));
+    }
+    return value.op === "board:replace" && Array.isArray(value.shapes) && value.shapes.length <= 10000 && value.shapes.every(validWhiteboardShape);
+};
+const consumeWhiteboardQuota = (socket) => {
+    const now = Date.now();
+    const current = socket.data.whiteboardDeltaRate;
+    const rate = !current || now - current.windowStartedAt >= 1000 ? { windowStartedAt: now, count: 0 } : current;
+    rate.count += 1;
+    socket.data.whiteboardDeltaRate = rate;
+    return rate.count <= 30;
+};
 const initSocket = (server) => {
     io = new socket_io_1.Server(server, {
         pingTimeout: 60000,
@@ -112,7 +145,7 @@ const initSocket = (server) => {
                 socket.join(`chat:${chatId}`);
             }
             catch (error) {
-                console.error("[socket] join chat", error);
+                (0, telemetry_1.logError)("socket.chat.join.failed", error, { socketId: socket.id, userId, chatId });
                 socket.emit("realtime:error", { resource: "chat", message: "Unable to join workspace" });
             }
         });
@@ -139,7 +172,7 @@ const initSocket = (server) => {
                 }
             }
             catch (error) {
-                console.error("[socket] new message", error);
+                (0, telemetry_1.logError)("socket.message.broadcast.failed", error, { socketId: socket.id, userId, chatId, messageId });
             }
         });
         socket.on("note:join", async (noteId) => {
@@ -155,7 +188,7 @@ const initSocket = (server) => {
                 noteChats[noteId] = chatId;
             }
             catch (error) {
-                console.error("[socket] note:join", error);
+                (0, telemetry_1.logError)("socket.note.join.failed", error, { socketId: socket.id, userId, noteId });
             }
         });
         socket.on("note:leave", (noteId) => {
@@ -187,7 +220,7 @@ const initSocket = (server) => {
                 socket.emit("note:saved", { noteId, success: true });
             }
             catch (error) {
-                console.error("[socket] note:save", error);
+                (0, telemetry_1.logError)("socket.note.save.failed", error, { socketId: socket.id, userId, noteId });
                 socket.emit("note:save-error", { noteId, message: "Failed to save note" });
             }
         });
@@ -204,7 +237,7 @@ const initSocket = (server) => {
                 whiteboardChats[whiteboardId] = chatId;
             }
             catch (error) {
-                console.error("[socket] whiteboard:join", error);
+                (0, telemetry_1.logError)("socket.whiteboard.join.failed", error, { socketId: socket.id, userId, whiteboardId });
             }
         });
         socket.on("whiteboard:leave", (whiteboardId) => {
@@ -212,14 +245,16 @@ const initSocket = (server) => {
             const whiteboardChats = (socket.data.whiteboardChats ?? {});
             delete whiteboardChats[whiteboardId];
         });
-        socket.on("whiteboard:draw", (payload) => {
-            if (!payload?.whiteboardId ||
-                serializedSize(payload.drawingData) > 1500000 ||
-                !socket.rooms.has(`whiteboard:${payload.whiteboardId}`))
+        socket.on("whiteboard:delta", (payload) => {
+            if (!payload?.whiteboardId || !Array.isArray(payload.deltas) || payload.deltas.length < 1 || payload.deltas.length > 50)
                 return;
-            socket
-                .to(`whiteboard:${payload.whiteboardId}`)
-                .emit("whiteboard:update", payload.drawingData);
+            if (!consumeWhiteboardQuota(socket) || serializedSize(payload.deltas) > 64000 || !payload.deltas.every(validWhiteboardDelta)) {
+                socket.emit("realtime:error", { resource: "whiteboard", message: "Whiteboard update rate or payload exceeded" });
+                return;
+            }
+            if (!socket.rooms.has(`whiteboard:${payload.whiteboardId}`))
+                return;
+            socket.to(`whiteboard:${payload.whiteboardId}`).emit("whiteboard:deltas", payload.deltas);
         });
         socket.on("whiteboard:clear-all", (payload) => {
             if (!payload?.whiteboardId || !socket.rooms.has(`whiteboard:${payload.whiteboardId}`))
@@ -242,7 +277,7 @@ const initSocket = (server) => {
                 socket.emit("whiteboard:saved", { whiteboardId, success: true });
             }
             catch (error) {
-                console.error("[socket] whiteboard:save", error);
+                (0, telemetry_1.logError)("socket.whiteboard.save.failed", error, { socketId: socket.id, userId, whiteboardId });
                 socket.emit("whiteboard:save-error", { whiteboardId, message: "Failed to save whiteboard" });
             }
         });
@@ -271,7 +306,7 @@ const initSocket = (server) => {
                 socket.to(`meeting:${callId}`).emit("meeting:user-joined", { userId });
             }
             catch (error) {
-                console.error("[socket] meeting:join", error);
+                (0, telemetry_1.logError)("socket.meeting.join.failed", error, { socketId: socket.id, userId, callId });
             }
         });
         socket.on("meeting:leave", (callId) => {

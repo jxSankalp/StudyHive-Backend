@@ -4,7 +4,9 @@
   "description": "",
   "main": "server.js",
   "scripts": {
-    "test": "npm run build && node --test tests/permissions.test.js tests/messageCursor.test.js",
+    "test": "npm run build && node --test tests/permissions.test.js tests/messageCursor.test.js tests/searchCursor.test.js && vitest run",
+    "test:integration": "vitest run",
+    "test:rls": "vitest run tests/rls.integration.test.ts",
     "dev": "ts-node-dev src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js"
@@ -17,20 +19,26 @@
     "node": ">=20 <23"
   },
   "dependencies": {
+    "@sentry/node": "^10.71.0",
     "@stream-io/node-sdk": "^0.4.26",
     "@supabase/supabase-js": "^2.104.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
+    "pino": "^10.3.1",
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
     "@types/cookie-parser": "^1.4.7",
     "@types/express": "^5.0.2",
     "@types/node": "^22.16.3",
+    "@types/supertest": "^7.2.1",
+    "socket.io-client": "^4.8.1",
+    "supertest": "^7.2.2",
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
   }
 }

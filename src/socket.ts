@@ -4,6 +4,7 @@ import { getNoteChatId, getWhiteboardChatId, isChatMember } from "./lib/access";
 import { supabase } from "./lib/supabase";
 import { corsOrigin } from "./lib/cors";
 import { hydrateChatMessages, MESSAGE_SELECT } from "./lib/chatMessages";
+import { logError } from "./lib/telemetry";
 
 let io: Server;
 const onlineUsers = new Map<string, Set<string>>();
@@ -64,6 +65,37 @@ const serializedSize = (value: unknown) => {
   }
 };
 
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
+const validWhiteboardShape = (value: unknown) => {
+  if (!isRecord(value) || !isRecord(value.attrs)) return false;
+  const attrs = value.attrs;
+  return typeof attrs.shapeId === "string" && attrs.shapeId.length > 0 && attrs.shapeId.length <= 100
+    && ["pen", "eraser", "text", "rectangle", "circle"].includes(String(attrs.tool))
+    && typeof attrs.x === "number" && Number.isFinite(attrs.x)
+    && typeof attrs.y === "number" && Number.isFinite(attrs.y)
+    && (!Array.isArray(attrs.points) || (attrs.points.length <= 20_000 && attrs.points.every((point) => typeof point === "number" && Number.isFinite(point))));
+};
+const validWhiteboardDelta = (value: unknown) => {
+  if (!isRecord(value) || typeof value.op !== "string") return false;
+  if (value.op === "shape:add") return validWhiteboardShape(value.shape);
+  if (value.op === "shape:patch") {
+    const allowedAttrs = new Set(["width", "height", "radius"]);
+    return typeof value.shapeId === "string" && value.shapeId.length <= 100 && isRecord(value.attrs)
+      && Object.entries(value.attrs).every(([key, candidate]) => allowedAttrs.has(key) && typeof candidate === "number" && Number.isFinite(candidate))
+      && (!Array.isArray(value.appendPoints) || (value.appendPoints.length <= 128 && value.appendPoints.every((point) => typeof point === "number" && Number.isFinite(point))));
+  }
+  return value.op === "board:replace" && Array.isArray(value.shapes) && value.shapes.length <= 10_000 && value.shapes.every(validWhiteboardShape);
+};
+
+const consumeWhiteboardQuota = (socket: { data: Record<string, unknown> }) => {
+  const now = Date.now();
+  const current = socket.data.whiteboardDeltaRate as { windowStartedAt: number; count: number } | undefined;
+  const rate = !current || now - current.windowStartedAt >= 1000 ? { windowStartedAt: now, count: 0 } : current;
+  rate.count += 1;
+  socket.data.whiteboardDeltaRate = rate;
+  return rate.count <= 30;
+};
+
 interface MessagePayload {
   id?: string;
   _id?: string;
@@ -119,7 +151,7 @@ export const initSocket = (server: HTTPServer) => {
         }
         socket.join(`chat:${chatId}`);
       } catch (error) {
-        console.error("[socket] join chat", error);
+        logError("socket.chat.join.failed", error, { socketId: socket.id, userId, chatId });
         socket.emit("realtime:error", { resource: "chat", message: "Unable to join workspace" });
       }
     });
@@ -144,7 +176,7 @@ export const initSocket = (server: HTTPServer) => {
           socket.to(`chat:${chatId}`).emit("message received", hydrated);
         }
       } catch (error) {
-        console.error("[socket] new message", error);
+        logError("socket.message.broadcast.failed", error, { socketId: socket.id, userId, chatId, messageId });
       }
     });
 
@@ -159,7 +191,7 @@ export const initSocket = (server: HTTPServer) => {
         const noteChats = (socket.data.noteChats ??= {}) as Record<string, string>;
         noteChats[noteId] = chatId;
       } catch (error) {
-        console.error("[socket] note:join", error);
+        logError("socket.note.join.failed", error, { socketId: socket.id, userId, noteId });
       }
     });
 
@@ -191,7 +223,7 @@ export const initSocket = (server: HTTPServer) => {
         if (error) throw error;
         socket.emit("note:saved", { noteId, success: true });
       } catch (error) {
-        console.error("[socket] note:save", error);
+        logError("socket.note.save.failed", error, { socketId: socket.id, userId, noteId });
         socket.emit("note:save-error", { noteId, message: "Failed to save note" });
       }
     });
@@ -208,7 +240,7 @@ export const initSocket = (server: HTTPServer) => {
         const whiteboardChats = (socket.data.whiteboardChats ??= {}) as Record<string, string>;
         whiteboardChats[whiteboardId] = chatId;
       } catch (error) {
-        console.error("[socket] whiteboard:join", error);
+        logError("socket.whiteboard.join.failed", error, { socketId: socket.id, userId, whiteboardId });
       }
     });
 
@@ -218,19 +250,15 @@ export const initSocket = (server: HTTPServer) => {
       delete whiteboardChats[whiteboardId];
     });
 
-    socket.on(
-      "whiteboard:draw",
-      (payload: { whiteboardId?: string; drawingData?: unknown }) => {
-        if (
-          !payload?.whiteboardId ||
-          serializedSize(payload.drawingData) > 1_500_000 ||
-          !socket.rooms.has(`whiteboard:${payload.whiteboardId}`)
-        ) return;
-        socket
-          .to(`whiteboard:${payload.whiteboardId}`)
-          .emit("whiteboard:update", payload.drawingData);
+    socket.on("whiteboard:delta", (payload: { whiteboardId?: string; deltas?: unknown[] }) => {
+      if (!payload?.whiteboardId || !Array.isArray(payload.deltas) || payload.deltas.length < 1 || payload.deltas.length > 50) return;
+      if (!consumeWhiteboardQuota(socket) || serializedSize(payload.deltas) > 64_000 || !payload.deltas.every(validWhiteboardDelta)) {
+        socket.emit("realtime:error", { resource: "whiteboard", message: "Whiteboard update rate or payload exceeded" });
+        return;
       }
-    );
+      if (!socket.rooms.has(`whiteboard:${payload.whiteboardId}`)) return;
+      socket.to(`whiteboard:${payload.whiteboardId}`).emit("whiteboard:deltas", payload.deltas);
+    });
 
     socket.on("whiteboard:clear-all", (payload: { whiteboardId?: string }) => {
       if (!payload?.whiteboardId || !socket.rooms.has(`whiteboard:${payload.whiteboardId}`)) return;
@@ -251,7 +279,7 @@ export const initSocket = (server: HTTPServer) => {
           if (error) throw error;
           socket.emit("whiteboard:saved", { whiteboardId, success: true });
         } catch (error) {
-          console.error("[socket] whiteboard:save", error);
+          logError("socket.whiteboard.save.failed", error, { socketId: socket.id, userId, whiteboardId });
           socket.emit("whiteboard:save-error", { whiteboardId, message: "Failed to save whiteboard" });
         }
       }
@@ -277,7 +305,7 @@ export const initSocket = (server: HTTPServer) => {
         socket.join(`meeting:${callId}`);
         socket.to(`meeting:${callId}`).emit("meeting:user-joined", { userId });
       } catch (error) {
-        console.error("[socket] meeting:join", error);
+        logError("socket.meeting.join.failed", error, { socketId: socket.id, userId, callId });
       }
     });
 
