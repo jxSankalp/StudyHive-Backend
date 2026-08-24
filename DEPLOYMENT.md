@@ -8,7 +8,7 @@ npm test
 ```
 
 `npm test` performs the TypeScript production build, runs 16 unit/regression cases,
-and runs seven in-memory HTTP/Socket.IO authorization integration cases. It also
+and runs 11 in-memory HTTP/Socket.IO/AI integration cases. It also
 discovers four real-Supabase RLS cases; those run only when the disposable test
 project variables below are configured.
 
@@ -38,15 +38,20 @@ Use `render.yaml` and configure:
 - `CLIENT_URLS=https://*.vercel.app` only if previews need API access
 - `SUPABASE_URL` and server-only `SUPABASE_SERVICE_ROLE_KEY`
 - `STREAM_API_KEY` and server-only `STREAM_API_SECRET`
+- server-only `GEMINI_API_KEY` to enable chat catch-up digests
+- optional `GEMINI_MODEL`, `GEMINI_TIMEOUT_MS`, and `AI_DIGEST_*` quota/cache tuning
 - optional `LOG_LEVEL`, `SENTRY_DSN`, and `SENTRY_TRACES_SAMPLE_RATE`
 
-The service-role and Stream secret must never be copied into Vercel. Render builds with `npm ci && npm run build`, starts with `npm start`, and checks `/health`.
+The service-role, Stream secret, and Gemini key must never be copied into Vercel or
+given a `VITE_` prefix. Render builds with `npm ci && npm run build`, starts with
+`npm start`, and checks `/health`. If `GEMINI_API_KEY` is absent, the rest of the
+application remains available and the catch-up endpoint returns `AI_NOT_CONFIGURED`.
 
 ## Release order
 
 1. Back up/verify the target Supabase project and apply pending migrations.
 2. Run `npm test`.
-3. Deploy Render and verify `/health`, auth, workspace search, idempotent message retry, paginated messages, a signed upload, and read acknowledgement. Record the returned `X-Request-ID` when diagnosing failures.
+3. Deploy Render and verify `/health`, auth, workspace search, idempotent message retry, paginated messages, a signed upload, read acknowledgement, and one member-authorized catch-up digest. Record the returned `X-Request-ID` when diagnosing failures.
 4. Deploy Vercel.
 5. Run a two-user smoke test for unread counts, “seen by,” mentions, file access,
    non-member denial, whiteboard delta sync, room revocation after member removal,

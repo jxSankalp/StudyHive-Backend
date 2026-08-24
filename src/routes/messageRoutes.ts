@@ -1,5 +1,6 @@
 import express from "express";
 import { allMessages, deleteMessage, getMessageById, sendMessage, toggleReaction, updateMessage } from "../controllers/messageController";
+import { createCatchUpDigest } from "../controllers/aiDigestController";
 import { authMiddleware } from "../middleware/authMiddleware";
 
 const router = express.Router();
@@ -8,6 +9,7 @@ const router = express.Router();
 router.use(authMiddleware);
 
 router.route("/:chatId").get(allMessages);
+router.post("/:chatId/catch-up", createCatchUpDigest);
 router.get("/:chatId/:messageId", getMessageById);
 router.route("/").post(sendMessage);
 router.patch("/:messageId", updateMessage);
